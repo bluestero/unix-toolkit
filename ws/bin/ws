@@ -12,6 +12,8 @@ ROOT="$(cd "$(dirname "$SELF")/../.." && pwd)"
 . "$ROOT/lib/ui.sh"
 # shellcheck source=../../lib/workspaces.sh
 . "$ROOT/lib/workspaces.sh"
+# shellcheck source=../../lib/hat.sh
+. "$ROOT/lib/hat.sh"
 
 CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/ws"
 IDE_CONF="$CONF_DIR/ide"
@@ -135,13 +137,13 @@ is_open() { grep -Fxq "$1" <<<"$OPEN"; }
 # full path
 ws_info() { printf '%s' "${C_DIM}$(tilde "$1")${C_RESET}"; }
 
-# name<S>shown name (● when open)<S>info
+# name<S>shown name (● when open)<S>info<S>its hat: Claude<S>GitHub<S>AWS (lib/hat.sh)
 rows() {
   local name path
   while IFS="$T" read -r name path; do
     [[ -n $name ]] || continue
-    if is_open "$name"; then printf '%s\n' "$name$S$(ui_mark_here) $C_GREEN$C_BOLD$name$C_RESET$S$(ws_info "$path")"
-    else printf '%s\n' "$name$S  $name$S$(ws_info "$path")"; fi
+    if is_open "$name"; then printf '%s\n' "$name$S$(ui_mark_here) $C_GREEN$C_BOLD$name$C_RESET$S$(ws_info "$path")$S$(hat_cells "$path")"
+    else printf '%s\n' "$name$S  $name$S$(ws_info "$path")$S$(hat_cells "$path")"; fi
   done <<<"$ENTRIES"
 }
 
@@ -298,15 +300,17 @@ ws_ls() {
   [[ -t 1 ]] || ui_no_color
   local ide; ide=$(default_ide)
   OPEN=$(open_names "$ide")
-  { printf '%s\n' "  ${C_BOLD}WORKSPACE${C_RESET}$S${C_BOLD}FOLDER${C_RESET}"; rows | cut -d"$S" -f2-; } |
-    ui_table "ws · workspaces" "$(ui_mark_here) open in $(ide_field "$ide" 4)"
+  local b=$C_BOLD r=$C_RESET
+  { printf '%s\n' "  ${b}WORKSPACE${r}$S${b}FOLDER${r}$S${b}CLAUDE${r}$S${b}GITHUB${r}$S${b}AWS${r}"; rows | cut -d"$S" -f2-; } |
+    ui_table "ws · workspaces" "$(ui_mark_here) open in $(ide_field "$ide" 4)" \
+      "${C_DIM}Claude, GitHub, AWS: set with hat · ↑ from a parent folder · ⇄ from the repo's remote · – the default${C_RESET}"
 }
 
 usage() {
   ui_help ws "workspaces in your IDE" <<'EOF'
 ws	picker	←→ IDE · tab tick · ctrl-x close
 ws <name>...	open these in the default IDE (focus them if already open)
-ws ls	every workspace, ● = open in the default IDE
+ws ls	every workspace, ● = open in the default IDE, and its hat	Claude, GitHub, AWS: hat
 ws close <name>...	close their windows	needs Window Calls: ./install.sh window-calls
 ws default [ide]	show the IDEs / set the one ws opens in	WS_EDITOR overrides it once
 ws edit	your workspace list	~/.config/ws/workspaces

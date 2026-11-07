@@ -1,6 +1,6 @@
 ---
 name: work-toolkit
-description: The user's work shell toolkit (okcli for Okta AWS profiles and repo pins, kx for Kubernetes contexts, ctx, twin, ws, tk). Use before running any aws, kubectl, helm, terraform or eks command, when a repo has an .envrc pin, when asked which AWS account/cluster/access level applies, or when the user mentions okcli, kx, ctx, twin, ws or tk.
+description: The user's work shell toolkit (okcli for Okta AWS profiles and repo pins, kx for Kubernetes contexts, ctx, twin, ws, tk, hat). Use before running any aws, kubectl, helm, terraform or eks command, when a repo has an .envrc pin, when asked which AWS account/cluster/access level applies, when asked which GitHub account or Claude profile a folder uses, or when the user mentions okcli, kx, ctx, twin, ws, tk or hat.
 ---
 
 # Work toolkit
@@ -36,6 +36,14 @@ So don't trust the inherited environment. Name the profile or context on each co
 | `kubectl --context <context> -n <ns> ...` | relying on the current context |
 
 The pin, when there is one, is the profile the user meant for that repo. Use it.
+
+## Which GitHub account and Claude profile (hat)
+
+`hat show` (in a folder) says which Claude profile, GitHub account and AWS profile it uses and
+where from; `hat ls` lists every folder that has one. Before committing or pushing, check
+`git config user.email` matches the account `hat show` names. Changing a folder's hat
+(`hat set`, `hat off`) or adding/removing accounts edits ~/.gitconfig and .envrc files: only
+when the user asks.
 
 ## Commands you can run freely (read-only)
 

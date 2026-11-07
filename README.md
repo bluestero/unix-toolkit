@@ -11,6 +11,7 @@ Every command speaks the same words: `<tool>` picker, `<tool> <name>` switch, `l
 | `kx` | Kubernetes contexts **per shell** (switching in one terminal never moves another), namespaces, global default, EKS contexts linked to okcli profiles. Also a friendly front to kubectl: `kx pods`, `why`, `logs`, `shell`, `deploys`, `configs`, `secrets`, `services`, `forward`, `events`, `top`, `get` (see `kx help`). |
 | `twin` | Twingate exit nodes: picker, `twin gb`, `twin off`. Codes come from the node names. |
 | `ws` | Open workspaces in your IDE. Picker: ↑↓ pick, ←→ switch IDE (● = already open there, gets focused), tab ticks several, ctrl-x closes the window (needs `window-calls`). `ws <name>`, `ws close <name>`, `ws ls`, `ws default [ide]`, `ws edit` (your list: `~/.config/ws/workspaces`, which can include your layers' shared lists). |
+| `hat` | Which Claude profile, GitHub account and AWS profile a folder uses, for every repo under it. `hat` is a panel of folders (enter change, alt-a add a folder, ctrl-x take off, alt-c Claude profiles, alt-g GitHub accounts); `hat set ~/code claude=personal github=me`, `hat ls`, `hat show`, `hat github add <account>` (makes the SSH key too). `ws ls` shows each workspace's. See [Hats](#hats-claude-github-and-aws-per-folder). |
 | `ctx` | One screen: AWS profile, cluster/namespace, Twingate, defaults and repo pin. `ctx plain` gives the same as labelled lines (what Claude Code gets). |
 | `k-icon` | Kitty app icon: picker, `k-icon <name>`, `k-icon ls`. |
 | `k-config` | Edit `kitty/kitty.conf` (the file kitty reads through the link) in `$EDITOR` (else nano); warns if the link is missing. kitty reloads it by itself on save (0.47+). |
@@ -187,6 +188,22 @@ and faded grey suggestions from history (Shift+Tab, → or End accepts, Alt+F on
 `shell/init.sh`, so zsh gets exactly the same aliases and tools as bash. Your own zsh tweaks go
 in `~/.zshrc` outside the managed block.
 
+## Hats: Claude, GitHub and AWS per folder
+
+Not an installer step: set it up when you need it, with `hat`.
+
+| | Where it goes | Covers |
+|---|---|---|
+| Claude profile | `export CLAUDE_CONFIG_DIR=…` in the folder's `.envrc` (direnv); profiles are `~/.claude-profiles/<name>` | everything under the folder |
+| AWS profile | `export AWS_PROFILE=…` in the `.envrc`, the same line `okcli pin` writes | everything under the folder |
+| GitHub account | `[includeIf "gitdir:<folder>/"]` in `~/.gitconfig` → `~/.config/hat/github/<account>.gitconfig` | every repo under the folder |
+
+A GitHub account is its commit name and email plus its SSH key; its own small ssh config
+offers that key first, so plain `git@github.com:` remotes sign in as that account. `.envrc`
+files hat writes start with `source_up_if_exists`, so a repo's own `.envrc` doesn't drop its
+parent folder's hat. In `hat ls` and `ws ls`: `↑` from a parent folder, `⇄` from the repo's
+remote (an `includeIf "hasconfig:remote…"` rule pointing at an account file), `–` the default.
+
 ## Pin, switch, default (AWS and Kubernetes work the same way)
 
 | Level | AWS | Kubernetes | Scope |
@@ -230,6 +247,7 @@ okta/                       okcli and its README
 kube/bin/kx, kube/shell/    kx and its shell hook
 twingate/bin/twin, shell/   twin
 ws/bin/ws, shell/           ws (lib/workspaces.sh reads the lists)
+bin/hat, lib/hat.sh         hat: Claude, GitHub and AWS per folder
 lib/layers.sh               what a layer can hold; layers/ (gitignored) holds them
 claude/skills/work-toolkit/ the Claude Code skill (what each tool is for, what to ask before)
 kitty/                      kitty config, installers, k-icon, k-bg, k-theme (kitty/bin) + backgrounds/, themes/

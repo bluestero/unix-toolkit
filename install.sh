@@ -124,7 +124,8 @@ if [[ "$mode" == ask && $named == 0 ]]; then
     if [[ "$(group_of "$id")" != "$prev" ]]; then
       prev=$(group_of "$id"); labels+=("## $prev"); ids+=("")
     fi
-    on+="${#labels[@]} "
+    # Dash2Dock and Dash to Panel both replace Ubuntu's dock: with the panel in, leave the dock unticked
+    [[ $id == dash2dock ]] && d2d_other_bar || on+="${#labels[@]} "
     labels+=("$id"$'\t'"$("$(fn title "$id")")"); ids+=("$id")
   done
   CHECKLIST_ON=$on checklist "Pick what to set up:" "${labels[@]}" || { say "Cancelled. Nothing changed."; exit 0; }
@@ -162,6 +163,7 @@ printf '%s' "$summary" | print_table 3 | sed 's/\x1b\[[0-9;]*m//g' >>"$log_file"
 if [[ -t 1 ]]; then
   printf '%s' "$summary" | print_table 3 |
     ui_box "done" "open a new terminal to pick it up" 0 "$(ui_hint "undo: ./uninstall.sh · log: ${log_file/#$HOME/\~}")"
+  say "${D}Separate Claude, GitHub or AWS accounts for some folders? ${R}${B}hat${R}${D} sets them up (not an installer step).${R}"
 else
   printf '%s' "$summary" | print_table 3
 fi

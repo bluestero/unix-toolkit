@@ -1,0 +1,314 @@
+#!/usr/bin/env bash
+# hat - which hat a folder wears: its Claude profile, GitHub account and AWS
+# profile, for every folder and repo under it. `hat help` lists the commands.
+# How each is applied: lib/hat.sh.
+
+set -uo pipefail
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
+# shellcheck source=../lib/ui.sh
+. "$ROOT/lib/ui.sh"
+# shellcheck source=../lib/hat.sh
+. "$ROOT/lib/hat.sh"
+S=$'\x1f'
+KINDS=(claude github aws)
+tilde() { printf '%s' "${1/#$HOME/\~}"; }
+kind_label() { case $1 in claude) echo "Claude profile" ;; github) echo "GitHub account" ;; aws) echo "AWS profile" ;; esac; }
+kind_values() { case $1 in claude) hat_claude_profiles ;; github) hat_github_accounts ;; aws) hat_aws_profiles ;; esac; }
+abs() { local p=${1:-$PWD}; [[ $p == "~"* ]] && p="$HOME${p:1}"; realpath -m -- "$p"; }
+
+# ------------------------------------------------------------- folders ---
+# The folders the panel lists: the ones you gave a hat (and that still exist).
+folders() { [[ -r $HAT_FOLDERS ]] && while IFS= read -r d; do [[ -d $d ]] && echo "$d"; done <"$HAT_FOLDERS"; return 0; }
+register() { folders | grep -Fxq "$1" || { mkdir -p "$HAT_DIR"; echo "$1" >>"$HAT_FOLDERS"; }; }
+unregister() { [[ -f $HAT_FOLDERS ]] && grep -Fxv "$1" "$HAT_FOLDERS" >"$HAT_FOLDERS.tmp"; mv -f "$HAT_FOLDERS.tmp" "$HAT_FOLDERS" 2>/dev/null; return 0; }
+# a pin in ~ (or /) would apply everywhere: that's what the defaults are for
+check_dir() {
+  [[ -d $1 ]] || die "No folder $(tilde "$1")"
+  [[ $1 != "$HOME" && $1 != / ]] || die "That's $(tilde "$1"), so it would apply everywhere. Pick a folder of its own."
+}
+
+# ---------------------------------------------------------------- .envrc ---
+direnv_allow() { command -v direnv >/dev/null && direnv allow "$1" 2>/dev/null; return 0; }
+envrc_set() {   # <dir> <VAR> <value>
+  local f=$1/.envrc
+  if [[ ! -f $f ]]; then printf '%s\n' "source_up_if_exists  # hat: the parent folders' settings still apply" >"$f"
+  elif ! grep -q '^[[:space:]]*source_up' "$f"; then sed -i "1i source_up_if_exists  # hat: the parent folders' settings still apply" "$f"; fi
+  sed -i "/^export $2=/d" "$f"
+  printf 'export %s=%s  # hat\n' "$2" "$3" >>"$f"
+  direnv_allow "$1"
+}
+envrc_unset() {   # <dir> <VAR>
+  local f=$1/.envrc
+  [[ -f $f ]] || return 0
+  sed -i "/^export $2=/d" "$f"
+  # nothing left but the line hat added: the file goes
+  if ! grep -v '^[[:space:]]*\(#.*\)\{0,1\}$' "$f" | grep -qv '^source_up_if_exists  # hat'; then rm -f "$f"
+  else direnv_allow "$1"; fi
+}
+
+# ------------------------------------------------------------------ set ---
+set_one() {   # <dir> <kind> <value or empty = back to the default>
+  local d=$1 k=$2 v=$3 key
+  if [[ -n $v ]] && ! kind_values "$k" | grep -Fxq -- "$v"; then
+    die "No $(kind_label "$k") '$v' · see: $([[ $k == aws ]] && echo "okcli ls" || echo "hat $k")"
+  fi
+  case $k in
+    claude) if [[ -n $v ]]; then envrc_set "$d" CLAUDE_CONFIG_DIR "\"${HAT_CLAUDE/#$HOME/\$HOME}/$v\""; else envrc_unset "$d" CLAUDE_CONFIG_DIR; fi ;;
+    aws)    if [[ -n $v ]]; then envrc_set "$d" AWS_PROFILE "$v"; else envrc_unset "$d" AWS_PROFILE; fi ;;
+    github)
+      key="includeIf.gitdir:$d/"
+      git config --global --remove-section "$key" 2>/dev/null
+      [[ -n $v ]] && git config --global "$key.path" "$(tilde "$HAT_GH/$v.gitconfig")" ;;
+  esac
+  if [[ -n $v ]]; then register "$d"; ok "$(tilde "$d"): $(kind_label "$k") → $v"
+  else has_any "$d" || unregister "$d"; ok "$(tilde "$d"): $(kind_label "$k") → the default"; fi
+}
+
+# true when the folder still has any hat of its own
+has_any() { local x; x=$(hat_get "$1"); awk -F'\t' -v d="$1" '$2 == d || $4 == d || $6 == d { f = 1 } END { exit !f }' <<<"$x"; }
+
+cmd_set() {   # [dir] [claude=x] [github=y] [aws=z]
+  local d="" a k v
+  for a in "$@"; do [[ $a == *=* ]] || d=$a; done
+  d=$(abs "$d"); check_dir "$d"
+  if [[ "$*" != *=* ]]; then edit_folder "$d"; return; fi
+  for a in "$@"; do
+    [[ $a == *=* ]] || continue
+    k=${a%%=*}; v=${a#*=}; [[ $v == - || $v == default ]] && v=""
+    [[ " ${KINDS[*]} " == *" $k "* ]] || die "Unknown '$k': use claude=, github= or aws="
+    set_one "$d" "$k" "$v"
+  done
+}
+
+cmd_off() {   # [dir]: take every hat off
+  local d k; d=$(abs "${1:-}")
+  has_any "$d" || { unregister "$d"; info "$(tilde "$d") has no hat of its own."; return 0; }
+  confirm "Take $(tilde "$d")'s Claude profile, GitHub account and AWS profile off? (back to the defaults)" n || return 0
+  for k in "${KINDS[@]}"; do set_one "$d" "$k" "" >/dev/null 2>&1; done
+  unregister "$d"; ok "$(tilde "$d"): back to the defaults"
+}
+
+# --------------------------------------------------------------- tables ---
+legend() { printf '%s' "${C_DIM}↑ from a parent folder · ⇄ from the repo's remote · – the default${C_RESET}"; }
+head_row() { printf '%s\n' "  ${C_BOLD}FOLDER${C_RESET}$S${C_BOLD}CLAUDE${C_RESET}$S${C_BOLD}GITHUB${C_RESET}$S${C_BOLD}AWS${C_RESET}"; }
+# <abs path><TAB>table row, the current folder first (● when it isn't listed)
+folder_rows() {
+  local d here; here=$(abs "$PWD")
+  folders | grep -Fxq "$here" || [[ $here == "$HOME" ]] ||
+    printf '%s\t%s\n' "$here" "$(ui_mark_here) $(tilde "$here")$S$(hat_cells "$here")"
+  while IFS= read -r d; do printf '%s\t%s\n' "$d" "  $(tilde "$d")$S$(hat_cells "$d")"; done < <(folders)
+}
+
+cmd_ls() {
+  [[ -t 1 ]] || ui_no_color
+  { head_row; folder_rows | cut -f2; } | ui_table "hat · folders" "$(legend)"
+}
+
+cmd_show() {
+  local d k i=0 x; d=$(abs "${1:-}")
+  [[ -t 1 ]] || ui_no_color
+  IFS=$'\x1f' read -r -a x <<<"$(hat_cells "$d")"
+  { printf 'folder\t%s\n' "$(tilde "$d")"
+    for k in "${KINDS[@]}"; do printf '%s\t%s\n' "$(kind_label "$k")" "${x[i]}"; i=$((i + 1)); done
+  } | ui_fields hat "$(legend)"
+}
+
+# ---------------------------------------------------------------- panel ---
+foot() { [[ -n ${MSG:-} ]] && ui_fzf_at_least 0.63 && printf -- '--footer=%s' "$MSG"; }
+
+# pick a value for one kind; prints it ("" = the default), 1 = cancelled
+pick_value() {
+  local d=$1 k=$2 cur out
+  case $k in claude) cur=1 ;; github) cur=3 ;; *) cur=5 ;; esac
+  cur=$(hat_get "$d" | cut -f"$cur")
+  out=$({ printf '\t  %s\n' "– the default (nothing set here)"
+          kind_values "$k" | while IFS= read -r v; do
+            if [[ $v == "$cur" ]]; then printf '%s\t%s\n' "$v" "$(ui_mark_here) $C_BOLD$v$C_RESET"; else printf '%s\t  %s\n' "$v" "$v"; fi
+          done; } |
+    ui_fzf "hat · $(kind_label "$k")" --delimiter='\t' --with-nth=2 --prompt="$k> " \
+      --header="$(kind_label "$k") for $(tilde "$d") · enter: pick · esc: back") || return 1
+  printf '%s' "${out%%$'\t'*}"
+}
+
+edit_folder() {   # change one folder's hats, one kind at a time
+  local d=$1 k v x
+  while :; do
+    IFS=$'\x1f' read -r -a x <<<"$(hat_cells "$d")"
+    k=$(printf '%s\t%s\n' claude "  Claude profile$S${x[0]}" github "  GitHub account$S${x[1]}" aws "  AWS profile$S${x[2]}" |
+      ui_fzf "hat · $(tilde "$d")" --delimiter='\t' --with-nth=2 --prompt='change> ' \
+        --header="$(tilde "$d") · enter: change · esc: back" | cut -f1) || return 0
+    [[ -n $k ]] || return 0
+    v=$(pick_value "$d" "$k") || continue
+    set_one "$d" "$k" "$v" 2>/dev/null
+    [[ $k == github && -n $v ]] && ! hat_github_key_ok "$v" &&
+      warn "the key in $(tilde "$HAT_GH/$v.gitconfig") isn't there yet · hat github"
+  done
+}
+gh_key() { sed -n 's/^[[:space:]]*IdentityFile[[:space:]]*//p' "$HAT_GH/$1.ssh_config" 2>/dev/null | head -1; }
+hat_github_key_ok() { local k; k=$(gh_key "$1"); [[ -n $k && -f ${k/#\~/$HOME} ]]; }
+# An account is two files: <a>.gitconfig (commit name and email, and the ssh to use)
+# and <a>.ssh_config. That one offers the account's key first, skipping the agent
+# (whose own order would win), then reads your ~/.ssh/config as usual.
+gh_write() {   # <account> <name> <email> <key>
+  mkdir -p "$HAT_GH"
+  printf '# hat: GitHub account %s (folders that wear it: hat ls)\n[user]\n\tname = %s\n\temail = %s\n[core]\n\tsshCommand = ssh -F %s\n' \
+    "$1" "$2" "$3" "$(tilde "$HAT_GH/$1.ssh_config")" >"$HAT_GH/$1.gitconfig"
+  printf '# hat: %s'"'"'s key first, then your own ssh config\nHost *\n\tIdentityFile %s\n\tIdentitiesOnly yes\n\tIdentityAgent none\nInclude ~/.ssh/config\n' \
+    "$1" "$(tilde "$4")" >"$HAT_GH/$1.ssh_config"
+}
+
+panel() {
+  command -v fzf >/dev/null && [[ -t 0 && -t 1 ]] || { cmd_ls; return 0; }
+  local out key d MSG=""
+  while :; do
+    out=$({ printf '\t%s\n' "$(head_row)"; folder_rows; } |
+      ui_fzf "hat · folders" --delimiter='\t' --with-nth=2 --header-lines=1 --prompt='folder> ' \
+        --expect=alt-a,ctrl-x,alt-c,alt-g $(foot) \
+        --header='enter: change · alt-a: add a folder · ctrl-x: take off · alt-c: Claude profiles · alt-g: GitHub accounts') || return 0
+    MSG=""
+    key=$(sed -n 1p <<<"$out"); d=$(sed -n 2p <<<"$out" | cut -f1)
+    case $key in
+      alt-a)
+        d=$(ui_ask "Folder to give a hat (~/... or /...)" "$(tilde "$PWD")/") || continue
+        d=$(abs "$d")
+        if [[ ! -d $d ]]; then MSG="✗ no folder $(tilde "$d")"; continue; fi
+        if [[ $d == "$HOME" || $d == / ]]; then MSG="✗ $(tilde "$d") would apply everywhere"; continue; fi
+        edit_folder "$d" ;;
+      ctrl-x) [[ -n $d ]] && MSG=$(cmd_off "$d" 2>&1 | tail -1) ;;
+      alt-c) accounts claude ;;
+      alt-g) accounts github ;;
+      *) [[ -n $d ]] && edit_folder "$d" ;;
+    esac
+  done
+}
+
+# ------------------------------------------------------------- accounts ---
+# who uses a profile/account: the listed folders that set it themselves
+users_of() {   # <kind> <value>
+  local d col; col=$([[ $1 == claude ]] && echo 1 || echo 3)
+  while IFS= read -r d; do
+    hat_get "$d" | awk -F'\t' -v c="$col" -v v="$2" -v d="$d" '$c == v && $(c + 1) == d { print d }'
+  done < <(folders)
+}
+
+acct_rows() {   # <kind>: <name><TAB>table row
+  local v
+  if [[ $1 == github ]]; then
+    printf '\t%s\n' "  ${C_BOLD}ACCOUNT${C_RESET}$S${C_BOLD}EMAIL${C_RESET}$S${C_BOLD}KEY${C_RESET}"
+    while IFS= read -r v; do
+      printf '%s\t  %s\n' "$v" "$v$S$(hat_gh_email "$v")$S$(gh_key "$v")$(hat_github_key_ok "$v" || printf ' %s' "${C_YELLOW}missing${C_RESET}")"
+    done < <(hat_github_accounts)
+  else
+    printf '\t%s\n' "  ${C_BOLD}PROFILE${C_RESET}$S${C_BOLD}FOLDER${C_RESET}"
+    while IFS= read -r v; do printf '%s\t  %s\n' "$v" "$v$S$(tilde "$HAT_CLAUDE/$v")"; done < <(hat_claude_profiles)
+  fi
+}
+
+accounts() {   # <kind>: the profiles/accounts panel
+  local k=$1 out key v MSG=""
+  while :; do
+    out=$(acct_rows "$k" | ui_fzf "hat · $(kind_label "$k")s" --delimiter='\t' --with-nth=2 --header-lines=1 \
+      --prompt="$k> " --expect=alt-a,ctrl-x $(foot) --header='alt-a: add · ctrl-x: remove · esc: back') || return 0
+    key=$(sed -n 1p <<<"$out"); v=$(sed -n 2p <<<"$out" | cut -f1); MSG=""
+    case $key in
+      alt-a) MSG=$("${k}_add" 2>&1 | tail -1) ;;
+      ctrl-x) [[ -n $v ]] && MSG=$("${k}_rm" "$v" 2>&1 | tail -1) ;;
+      *) ;;
+    esac
+  done
+}
+
+valid_name() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; }
+
+claude_add() {
+  local n=${1:-}
+  [[ -n $n ]] || n=$(ui_ask "New Claude profile name (e.g. personal, work)") || return 0
+  valid_name "$n" || die "'$n' isn't a usable name (letters, digits, . _ -)"
+  [[ -d $HAT_CLAUDE/$n ]] && die "There's already a profile '$n'"
+  mkdir -p "$HAT_CLAUDE/$n"
+  ok "Claude profile $n · give a folder this hat, run claude there and sign in"
+}
+claude_rm() {
+  local n=$1 u
+  [[ -d $HAT_CLAUDE/$n ]] || die "No Claude profile '$n'"
+  u=$(users_of claude "$n" | head -3)
+  [[ -z $u ]] || die "$(tilde "$(head -1 <<<"$u")") still uses $n · change it first"
+  [[ $(realpath -m "${CLAUDE_CONFIG_DIR:-}") == "$(realpath -m "$HAT_CLAUDE/$n")" ]] && die "$n is the one in use here"
+  confirm "Delete the Claude profile $n? Its sign-in, history and settings in $(tilde "$HAT_CLAUDE/$n") go too." n || return 0
+  rm -rf -- "${HAT_CLAUDE:?}/$n" && ok "Claude profile $n deleted"
+}
+
+github_add() {
+  local a=${1:-} name email key out
+  [[ -n $a ]] || a=$(ui_ask "GitHub account (its username)") || return 0
+  valid_name "$a" || die "'$a' isn't a GitHub username"
+  [[ -f $HAT_GH/$a.gitconfig ]] && die "There's already an account '$a'"
+  name=$(ui_ask "Your name on $a's commits" "$(git config --global user.name)") || return 0
+  email=$(ui_ask "Email on $a's commits") || return 0
+  [[ $email == ?*@?* ]] || die "'$email' isn't an email address"
+  key="$HOME/.ssh/github-$a"
+  if [[ ! -f $key ]]; then
+    if confirm "There's no SSH key ~/.ssh/github-$a yet. Make one?"; then
+      ssh-keygen -q -t ed25519 -C "$email" -f "$key" </dev/tty || die "ssh-keygen failed"
+      info "Add this public key to $a on GitHub (https://github.com/settings/ssh/new):"
+      info "  $(cat "$key.pub")"
+    else
+      key=$(ui_ask "Key file for $a" "~/.ssh/") || return 0; key=$(abs "$key")
+      [[ -f $key ]] || die "No key $(tilde "$key")"
+    fi
+  fi
+  gh_write "$a" "$name" "$email" "$key"
+  out=$(ssh -F "$HAT_GH/$a.ssh_config" -o BatchMode=yes -o ConnectTimeout=8 -T git@github.com 2>&1)
+  if [[ $out == *"Hi $a!"* ]]; then ok "GitHub account $a ($email); its key works"
+  else ok "GitHub account $a ($email) · its key isn't on GitHub yet: add $(tilde "$key").pub to $a"; fi
+}
+github_rm() {
+  local a=$1 u
+  [[ -f $HAT_GH/$a.gitconfig ]] || die "No GitHub account '$a'"
+  u=$(hat_git_rules | awk -F'\t' -v a="$a" '$2 == a { print $1; exit }')
+  [[ -z $u ]] || die "$(tilde "$u") still uses $a · change it first"
+  confirm "Remove the GitHub account $a from hat? (its SSH key stays)" n || return 0
+  rm -f "$HAT_GH/$a.gitconfig" "$HAT_GH/$a.ssh_config" && ok "GitHub account $a removed (the key stays in ~/.ssh)"
+}
+
+cmd_kind() {   # hat claude|github [add <name>|rm <name>]
+  local k=$1; shift
+  case "${1:-}" in
+    add) "${k}_add" "${2:-}" ;;
+    rm|remove) [[ -n ${2:-} ]] || die "Which one? · see: hat $k ls"; "${k}_rm" "$2" ;;
+    ls|"")
+      if [[ -z ${1:-} && -t 0 && -t 1 ]] && command -v fzf >/dev/null; then accounts "$k"; return; fi
+      [[ -t 1 ]] || ui_no_color
+      acct_rows "$k" | cut -f2 | ui_table "hat · $(kind_label "$k")s" ;;
+    *) ui_unknown "hat $k" "$1" ;;
+  esac
+}
+
+usage() {
+  ui_help hat "which Claude, GitHub and AWS a folder uses" <<'EOF'
+hat	the panel: folders and their hats	enter change · alt-a add a folder · ctrl-x take off
+hat ls	every folder with a hat (and this one)
+hat show [folder]	what this folder gets, and from where
+hat set [folder] [claude=…] [github=…] [aws=…]	give a folder a hat; =- goes back to the default	no values: pick them
+hat off [folder]	take its hats off
+hat claude [add|rm <name>]	Claude profiles (~/.claude-profiles/<name>)
+hat github [add|rm <account>]	GitHub accounts: commit name, email and SSH key
+hat help	this page
+
+A hat covers every folder and repo under it. Claude and AWS go in the folder's
+.envrc (direnv); GitHub is a gitdir rule in ~/.gitconfig, so plain git@github.com
+remotes use that account's key. ws ls shows each workspace's hat.
+EOF
+}
+
+case "${1:-}" in
+  "") panel ;;
+  help|-h|--help) usage ;;
+  ls|list) cmd_ls ;;
+  show) cmd_show "${2:-}" ;;
+  set) shift; cmd_set "$@" ;;
+  off) cmd_off "${2:-}" ;;
+  claude|github) k=$1; shift; cmd_kind "$k" "$@" ;;
+  *) ui_unknown hat "$1" ;;
+esac
