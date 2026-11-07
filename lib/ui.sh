@@ -360,8 +360,8 @@ ui_tabs() {
 # column widths, each hint ("key words") starting at its column's left edge. The hints
 # fill the rows in the order given (a tool's own keys first, then the common ones). A
 # warning line (! or !!) stays one line of its own, above the grid.
-# A note line ("# ↑ means …", what marks in the list mean) goes above the keys, grey,
-# with a blank line under it.
+# A note line ("# ↑ means …", what marks in the list mean) is the first row, grey,
+# the keys right under it.
 ui_keys() {   # ui_keys <header text> [max divider width]
   local text="$1" max="${2:-}" line item out="" warn="" note="" row w=0 plain kc wc room i c n cols tot pad
   local -a key=() words=() kcol=() wcol=() kw=()
@@ -413,7 +413,7 @@ ui_keys() {   # ui_keys <header text> [max divider width]
     done
     out+="${out:+$'\n'}${row%"${row##*[! ]}"}"
     out="${warn:+$warn$'\n'}$out"
-    out="${note:+$note$'\n\n'}$out"
+    out="${note:+$note$'\n'}$out"
   fi
   # The divider is as wide as the longest hint line (and fits beside a pane).
   while IFS= read -r line; do plain=$(strip_ansi "$line"); (( ${#plain} > w )) && w=${#plain}; done <<<"$out"

@@ -340,8 +340,12 @@ p_rows() {   # [width]
   done <"$IP/cells" | if [[ -n $sc ]]; then sort -t$'\t' -k1,1 -f $([[ $sd == desc ]] && echo -r); else cat; fi | cut -f2-
 } 2>/dev/null
 p_laid() { p_rows "$@" | UI_TABLE_FIELD=2 print_table 3 "$(( ${1:-${FZF_COLUMNS:-$(ui_cols)}} - 6 ))"; }
+# The table is made by the callback, before it answers, into $IP/shown; the reload
+# only cats it, so the new rows land right with the cursor move that goes with them.
+p_render() { p_laid >"$IP/shown.new" && mv -f "$IP/shown.new" "$IP/shown"; }
+p_reload() { p_render; ip_fz reload-sync "cat $(printf %q "$IP/shown")"; }
 # where a folder's row is (1 = first), for pos()
-p_pos_of() { p_laid | tail -n +2 | awk -F'\t' -v f="$1" '$1 == f { print NR; exit }'; }
+p_pos_of() { tail -n +2 "$IP/shown" | awk -F'\t' -v f="$1" '$1 == f { print NR; exit }'; }
 
 p_footer() {
   local n; n=$(p_unsaved)
@@ -356,13 +360,13 @@ p_jump() { ip_set jump "$(ip_get focus)"; }
 p_to_list() {   # [toast]
   local -a a
   p_jump
-  a=("$(ip_fz reload-sync "$(p_cmd __rows)")" "$(ip_back)"
+  a=("$(p_reload)" "$(ip_back)"
      "$(ip_fz change-header "$(p_keys "$P_HINTS")")" "$(ip_fz change-prompt 'folder> ')"
      "$(ip_fz change-border-label ' hat · folders ')" hide-preview)
   if [[ -n ${1:-} ]]; then a+=("$(ui_toast "$1")"); else a+=("$(p_footer)"); fi
   ip_join "${a[@]}"
 }
-p_redraw() { p_jump; ip_join "$(ip_fz reload-sync "$(p_cmd __rows)")" "$(p_footer)"; }
+p_redraw() { p_jump; ip_join "$(p_reload)" "$(p_footer)"; }
 
 # ---- the accounts lists (alt-c, alt-g)
 p_acct_rows() {   # kind
@@ -435,7 +439,8 @@ p_copy() {   # text → clipboard
 p_key() {   # key folder/row-key query
   local k=$1 f=$2 q=$3 mode
   mode=$(ip_get mode); mode=${mode:-list}
-  [[ $mode == list && $k != focus && $k != result ]] && ip_set saved_q "$q"
+  [[ ( $k == up || $k == down ) && $mode != list ]] && { echo "$k"; return; }
+  [[ $mode == list && $k != focus && $k != result && $k != up && $k != down ]] && ip_set saved_q "$q"
   case $mode in
     list)    p_key_list "$k" "$f" ;;
     confirm) local a; a=$(ip_answer "$k"); [[ -n $a ]] && p_confirmed "$a" ;;
@@ -484,10 +489,22 @@ p_key_list() {   # key folder
   local k=$1 f=$2 col n i sc sd pos
   col=$(ip_get col); col=${col:-1}
   case $k in
+    up|down)
+      # the arrows go to the next row first, then the cursor joins them in the same
+      # redraw (moving first, fzf would show the cursor before the arrows catch up)
+      local -a vis; local q; q=$(ip_get saved_q)
+      if [[ -n $q ]]; then mapfile -t vis < <(tail -n +2 "$IP/shown" | fzf --filter="$q" --delimiter='\t' --with-nth=2 --no-sort | cut -f1)
+      else mapfile -t vis < <(tail -n +2 "$IP/shown" | cut -f1); fi
+      n=${#vis[@]}; (( n )) || return 0
+      for (( i = 0; i < n; i++ )); do [[ ${vis[i]} == "$f" ]] && break; done
+      (( i < n )) || i=0
+      if [[ $k == down ]]; then i=$(( (i + 1) % n )); else i=$(( (i - 1 + n) % n )); fi
+      ip_set focus "${vis[i]}"
+      ip_join "$(p_reload)" "pos($(( i + 1 )))" ;;
     focus|resize)
       [[ $k == focus && ( -z $f || $f == "$(ip_get focus)" ) ]] && return 0
       [[ -n $f ]] && ip_set focus "$f"
-      p_jump; ip_fz reload-sync "$(p_cmd __rows)" ;;
+      p_jump; p_reload ;;
     result)
       local j; j=$(ip_get jump); ip_set jump ""
       [[ -n $j && -z $(ip_get saved_q) ]] || return 0
@@ -634,10 +651,14 @@ panel() {   # [folders|claude|github] [folder to add]
   [[ ${1:-folders} != folders ]] && start+="+transform($cb open-$1 '' '')"
   local -a binds=(--bind "start:$start" --bind "focus:transform:$cb focus {1} {q}" --bind "resize:transform:$cb resize {1} {q}"
     --bind "result:transform:$cb result {1} {q}")
+  # ↑↓ are the list's own: arrows and cursor move in one redraw (the focus event
+  # still covers other moves, like a click). In other modes they just move.
+  for k in up down; do binds+=(--bind "$k:transform:$cb $k {1} {q}"); done
   for k in enter esc y n left right alt-left alt-right tab alt-s alt-a ctrl-x alt-c alt-g alt-y; do
     binds+=(--bind "$k:transform:$cb $k {1} {q}")
   done
-  p_laid "$(ui_cols)" |
+  FZF_COLUMNS=$(ui_cols) p_render
+  cat "$IP/shown" |
     ui_fzf "hat · folders" --toast --with-shell='bash -c' --delimiter='\t' --with-nth=2 --header-lines=1 --no-sort \
       --prompt='folder> ' --header="$P_HINTS" --footer=' ' \
       --preview="$(printf %q "$SELF") __table" --preview-window='right,60%,hidden' \
