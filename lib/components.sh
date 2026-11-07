@@ -15,11 +15,13 @@
 # shellcheck source=platform.sh
 . "$repo/lib/platform.sh"
 
-COMPONENTS=(bash keys commands starship fzf kitty kitty-config kitty-bg kitty-theme kitty-accents kitty-icons kitty-nautilus kitty-centered zsh login-shell btop yazi window-calls alt-tab-desktop dash2dock dash-to-panel hide-docker-tray app-keys no-animations vitals-icons rofi eks-clusters repos claude-skill claude-hook claude-guidelines)
+COMPONENTS=(bash keys commands starship fzf kitty kitty-config kitty-bg kitty-theme kitty-accents kitty-icons kitty-nautilus kitty-centered zsh login-shell btop yazi window-calls alt-tab-desktop dash2dock dash-to-panel hide-docker-tray app-keys no-animations vitals vitals-icons blur-my-shell rounded-corners rofi eks-clusters repos claude-skill claude-hook claude-guidelines)
 # Shown in groups in the checklist; the rest are optional extras.
 RECOMMENDED=(bash keys commands starship fzf)
 KITTY_PARTS=(kitty kitty-config kitty-bg kitty-theme kitty-accents kitty-icons kitty-nautilus kitty-centered)
-DESKTOP_PARTS=(window-calls alt-tab-desktop dash2dock dash-to-panel hide-docker-tray app-keys no-animations vitals-icons rofi)
+DESKTOP_PARTS=(window-calls alt-tab-desktop dash2dock dash-to-panel hide-docker-tray app-keys no-animations vitals vitals-icons blur-my-shell rounded-corners rofi)
+# Components with a settings look: naming one that is installed opens the keep / look / defaults menu
+LOOK_PARTS=(dash-to-panel vitals blur-my-shell rounded-corners)
 WORKSPACE_PARTS=(repos)
 CLAUDE_PARTS=(claude-skill claude-hook claude-guidelines)
 CLOUD_PARTS=(eks-clusters)
@@ -45,7 +47,7 @@ requires_of() {
     fzf|kitty|login-shell|yazi)            echo "linux" ;;
     zsh|btop|kitty-bg|kitty-icons)         echo "apt" ;;
     kitty-nautilus|rofi)                   echo "gnome apt" ;;
-    kitty-centered|window-calls|alt-tab-desktop|dash2dock|dash-to-panel|hide-docker-tray|app-keys|no-animations|vitals-icons) echo "gnome" ;;
+    kitty-centered|window-calls|alt-tab-desktop|dash2dock|dash-to-panel|hide-docker-tray|app-keys|no-animations|vitals|vitals-icons|blur-my-shell|rounded-corners) echo "gnome" ;;
   esac
 }
 # component_unsupported <id>: the reason this machine can't run it; nothing when it can.
@@ -675,6 +677,139 @@ uninstall_no_animations() {
   forget_setting no-animations
 }
 
+# ------------------------------------------------------------- looks ---
+# A "look" is a preset of an extension's settings (gnome/<name>/settings.dconf, a dconf dump).
+# Installing asks whether to use it; the settings from before are kept once and the uninstall
+# offers them back, or the app's own defaults (dconf reset).
+# look_applied PATH FILE [IGNORE]: every setting in FILE is the same live (keys matching the
+# IGNORE regex are skipped: Dash to Panel stores panel keys per monitor).
+look_applied() {
+  python3 -I - "${3:-}" <(dconf dump "$1" 2>/dev/null) <(sed "s#@REPO@#$repo#" "$2") <<'PY'
+import re, sys
+ign = re.compile(sys.argv[1] or r"(?!)")
+def parse(p):
+    d, sec = {}, ""
+    for line in open(p):
+        line = line.rstrip("\n")
+        if line.startswith("["): sec = line
+        elif "=" in line and not line.startswith("#"):
+            k, v = line.split("=", 1); d[(sec, k)] = v
+    return d
+live, want = parse(sys.argv[2]), parse(sys.argv[3])
+sys.exit(0 if all(live.get(k) == v for k, v in want.items() if not ign.match(k[1])) else 1)
+PY
+}
+look_apply() {   # look_apply PATH FILE NAME
+  mkdir -p "$orig_dir"
+  [[ -f "$orig_dir/$3.dconf" ]] || dconf dump "$1" >"$orig_dir/$3.dconf" 2>/dev/null
+  sed "s#@REPO@#$repo#" "$2" | dconf load "$1"
+}
+look_reset() {   # look_reset PATH NAME: the app's defaults, or your settings from before the toolkit
+  dry && return 0
+  local f="$orig_dir/$2.dconf"
+  dconf reset -f "$1"
+  if grep -q = "$f" 2>/dev/null && ask "Put your own earlier $2 settings back? (No: the app's own defaults)"; then
+    dconf load "$1" <"$f" && ok "your earlier settings are back"
+  else ok "$2 settings back to the app's defaults"; fi
+  rm -f "$f" "$orig_dir/$2.last.dconf"
+}
+# look_menu PATH FILE NAME NICE [IGNORE]: what to do with the settings of an extension that
+# is already installed: keep, re-apply the toolkit look, reset to the app's defaults, or (when
+# a copy exists) undo the last change. The settings from just before a change are kept once.
+look_menu() {
+  local path=$1 file=$2 name=$3 nice=$4 ign=${5:-} last="$orig_dir/$3.last.dconf" state pick q rows
+  local keep="Keep my settings" app="Re-apply the toolkit look" rst="Reset to the app's defaults" und="Undo the last change"
+  if look_applied "$path" "$file" "$ign"; then state="match the toolkit look"; else state="differ from the toolkit look"; fi
+  case "$mode" in
+    dry) say "  ${C}?${R} $nice settings $state ${D}(dry run: not asked)${R}"; return 0 ;;
+    yes) look_applied "$path" "$file" "$ign" && { ok "look already applied"; return 0; }; pick=$app ;;
+    *)
+      if ! command -v fzf >/dev/null || [[ ! -t 0 ]]; then ok "settings kept"; return 0; fi
+      rows="$keep"$'
+'"$app"$'
+'"$rst"; [[ -f $last ]] && rows+=$'
+'"$und"
+      q="${C_BOLD}$nice settings $state${C_RESET}"
+      pick=$(printf '%s
+' "$rows" | ui_fzf "${UI_CONFIRM_LABEL:-settings}" --height=~60% --info=hidden         --no-separator --prompt='  ' --header="$q") || pick=$keep ;;
+  esac
+  case "$pick" in
+    "$app") mkdir -p "$orig_dir"; dconf dump "$path" >"$last" 2>/dev/null
+            look_apply "$path" "$file" "$name" && ok "look applied ${D}(the menu can undo it)${R}" ;;
+    "$rst") ask "Reset $nice to the app's defaults? (the menu can undo it)" n || { skip; return 0; }
+            mkdir -p "$orig_dir"; dconf dump "$path" >"$last" 2>/dev/null
+            dconf reset -f "$path" && ok "$nice settings back to the app's defaults ${D}(the menu can undo it)${R}" ;;
+    "$und") dconf reset -f "$path"; dconf load "$path" <"$last" && rm -f "$last" && ok "settings back to before the last change" ;;
+    *) ok "settings kept" ;;
+  esac
+}
+# A GNOME extension from extensions.gnome.org plus its look. gx_state UUID PATH FILE [IGNORE];
+# gx_install UUID NAME PATH FILE [IGNORE]
+gx_present() { [[ -d "$HOME/.local/share/gnome-shell/extensions/$1" ]]; }
+gx_enabled() { gsettings get org.gnome.shell enabled-extensions 2>/dev/null | grep -q "'$1'"; }
+gx_state() {
+  NOTE=""
+  if gx_present "$1" && gx_enabled "$1"; then
+    if look_applied "$2" "$3" "${4:-}"; then STATE=installed; else STATE=partial; NOTE="settings differ from the toolkit's look"; fi
+  elif gx_present "$1" || gx_enabled "$1"; then STATE=partial; NOTE="installed, not enabled"
+  else STATE=missing; fi
+}
+gx_install() {
+  local uuid=$1 name=$2
+  if gx_present "$uuid" && gx_enabled "$uuid"; then look_menu "$3" "$4" "$uuid" "$name" "${5:-}"; return; fi
+  if ! gx_present "$uuid"; then
+    ask "Download $name from extensions.gnome.org and install it?" || { skip; return 0; }
+    ext_download "$uuid" "$name" || return 1
+  fi
+  if ! gx_enabled "$uuid"; then
+    dry || ext_list add "$uuid"
+    ok "enabled"; warn "log out and back in once (Wayland loads new extensions only at login)"
+  fi
+  if look_applied "$3" "$4" "${5:-}"; then ok "look already applied"
+  elif ask "Use the toolkit's look for $name? (your current settings are kept for the uninstall)"; then
+    look_apply "$3" "$4" "$uuid" && ok "look applied"
+  else skip "keeping your settings"; fi
+}
+gx_uninstall() {
+  gx_present "$1" || { ok "not installed"; return; }
+  ext_list del "$1"
+  gnome-extensions disable "$1" >/dev/null 2>&1
+  gnome-extensions uninstall "$1" >/dev/null 2>&1 || rm -rf "$HOME/.local/share/gnome-shell/extensions/$1"
+  ok "$2 removed"
+  look_reset "$3" "$1"
+}
+
+# --------------------------------------------------------------- vitals ---
+# Vitals (CPU, memory, temperature in the top bar) with its look: which sensors show,
+# fixed widths, alphabetical dropdown. vitals-icons (below) adds the chip icons.
+vt_uuid="Vitals@CoreCoding.com"; vt_path=/org/gnome/shell/extensions/vitals/; vt_file="$repo/gnome/vitals/settings.dconf"
+label_vitals() { echo "Vitals"; }
+title_vitals() { echo "CPU, memory and temperature in the top bar (GNOME extension; log out once)"; }
+detail_vitals() { echo "GNOME extension $vt_uuid from extensions.gnome.org + preset look gnome/vitals (sensors shown, fixed widths); the uninstall offers your earlier settings or the defaults"; }
+state_vitals() { gx_state "$vt_uuid" "$vt_path" "$vt_file"; }
+install_vitals() { gx_install "$vt_uuid" "Vitals" "$vt_path" "$vt_file"; }
+uninstall_vitals() { gx_uninstall "$vt_uuid" "Vitals" "$vt_path"; }
+
+# -------------------------------------------------------- blur-my-shell ---
+# Blur my Shell: blurred overview (Liquid Glass), Alt+Tab and panel; applications untouched.
+bm_uuid="blur-my-shell@aunetx"; bm_path=/org/gnome/shell/extensions/blur-my-shell/; bm_file="$repo/gnome/blur-my-shell/settings.dconf"
+label_blur_my_shell() { echo "Blur my Shell"; }
+title_blur_my_shell() { echo "Blurred overview and Alt+Tab (GNOME extension; log out once)"; }
+detail_blur_my_shell() { echo "GNOME extension $bm_uuid from extensions.gnome.org + preset look gnome/blur-my-shell; the uninstall offers your earlier settings or the defaults"; }
+state_blur_my_shell() { gx_state "$bm_uuid" "$bm_path" "$bm_file"; }
+install_blur_my_shell() { gx_install "$bm_uuid" "Blur my Shell" "$bm_path" "$bm_file"; }
+uninstall_blur_my_shell() { gx_uninstall "$bm_uuid" "Blur my Shell" "$bm_path"; }
+
+# ------------------------------------------------------ rounded-corners ---
+# Rounded Window Corners Reborn: 12 px corners, kept off for maximized and fullscreen windows.
+rc_uuid="rounded-window-corners@fxgn"; rc_path=/org/gnome/shell/extensions/rounded-window-corners-reborn/; rc_file="$repo/gnome/rounded-window-corners/settings.dconf"
+label_rounded_corners() { echo "Rounded corners"; }
+title_rounded_corners() { echo "Rounded corners on every window (GNOME extension; log out once)"; }
+detail_rounded_corners() { echo "GNOME extension $rc_uuid from extensions.gnome.org + preset look gnome/rounded-window-corners (12 px); the uninstall offers your earlier settings or the defaults"; }
+state_rounded_corners() { gx_state "$rc_uuid" "$rc_path" "$rc_file"; }
+install_rounded_corners() { gx_install "$rc_uuid" "Rounded Window Corners" "$rc_path" "$rc_file"; }
+uninstall_rounded_corners() { gx_uninstall "$rc_uuid" "Rounded Window Corners" "$rc_path"; }
+
 # -------------------------------------------------------- vitals-icons ---
 # Clear CPU and memory icons for the Vitals top-bar extension (gnome/vitals-icons).
 # They go over the extension's "original" icon style; the old files are kept as
@@ -918,6 +1053,7 @@ d2d_other_bar() { [[ -d "$HOME/.local/share/gnome-shell/extensions/dash-to-panel
 dtp_uuid="dash-to-panel@jderose9.github.com"
 dtp_dir="$HOME/.local/share/gnome-shell/extensions/$dtp_uuid"; dtp_src="$repo/gnome/dash-to-panel"
 dtp_path=/org/gnome/shell/extensions/dash-to-panel/
+dtp_ignore='^panel-(anchors|element-positions|lengths|positions|sizes)$'   # stored per monitor id
 dtp_present() { [[ -d "$dtp_dir" ]]; }
 dtp_enabled() { gsettings get org.gnome.shell enabled-extensions 2>/dev/null | grep -q "'$dtp_uuid'"; }
 label_dash_to_panel() { echo "One bar (Dash to Panel)"; }
@@ -925,17 +1061,20 @@ title_dash_to_panel() { echo "dock and top bar merged into one bar, no Activitie
 detail_dash_to_panel() { echo "GNOME extension $dtp_uuid from extensions.gnome.org + preset look gnome/dash-to-panel; turns Ubuntu's dock off (put back by the uninstall)"; }
 state_dash_to_panel() { NOTE=""
   command -v gnome-shell >/dev/null || { STATE=n/a; NOTE="needs GNOME"; return; }
-  if dtp_present && dtp_enabled; then STATE=installed
+  if dtp_present && dtp_enabled; then
+    if look_applied "$dtp_path" "$dtp_src/settings.dconf" "$dtp_ignore"; then STATE=installed
+    else STATE=partial; NOTE="settings differ from the toolkit's look"; fi
   elif dtp_present || dtp_enabled; then STATE=partial
   else STATE=missing; fi; }
 install_dash_to_panel() {
-  if dtp_present && dtp_enabled; then ok "already installed"; return; fi
+  if dtp_present && dtp_enabled; then
+    look_menu "$dtp_path" "$dtp_src/settings.dconf" dash-to-panel "The bar" "$dtp_ignore"
+    return
+  fi
   ask "Merge the dock and top bar into one bar (Dash to Panel)?" n || { skip; return; }
   dtp_present || ext_download "$dtp_uuid" "Dash to Panel" || return 1
   if ask "Use the toolkit's look for it (bottom bar, 35 px, dark, new apps-button icon)? Your current settings are kept for the uninstall."; then
-    mkdir -p "$orig_dir"
-    [[ -f "$orig_dir/dash-to-panel.dconf" ]] || dconf dump "$dtp_path" >"$orig_dir/dash-to-panel.dconf" 2>/dev/null
-    sed "s#@REPO@#$repo#" "$dtp_src/settings.dconf" | dconf load "$dtp_path" && ok "look applied"
+    look_apply "$dtp_path" "$dtp_src/settings.dconf" dash-to-panel && ok "look applied"
   else skip; fi
   install_launcher_entry
   if ext_is_on ubuntu-dock@ubuntu.com; then
@@ -952,8 +1091,7 @@ uninstall_dash_to_panel() {
     gnome-extensions uninstall "$dtp_uuid" >/dev/null 2>&1 || rm -rf "$dtp_dir"
     ok "bar removed"
   fi
-  dconf reset -f "$dtp_path"
-  [[ -f "$orig_dir/dash-to-panel.dconf" ]] && { dconf load "$dtp_path" <"$orig_dir/dash-to-panel.dconf"; rm -f "$orig_dir/dash-to-panel.dconf"; }
+  look_reset "$dtp_path" dash-to-panel
   if [[ "$(recall_setting dock-ubuntu)" == on ]] && ! d2d_present; then
     gnome-extensions enable ubuntu-dock@ubuntu.com >/dev/null 2>&1 && ok "Ubuntu's dock back on"
     forget_setting dock-ubuntu

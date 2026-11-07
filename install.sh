@@ -81,6 +81,8 @@ for id in "${wanted[@]}"; do
   fi
   table+="  $id"$'\x1f'"$(badge "$STATE")"$'\x1f'"$D${NOTE}$R"$'\n'
   [[ "$STATE" == missing || "$STATE" == partial ]] && todo+=("$id")
+  # named on the command line and installed already: still offer its settings menu (keep / look / defaults)
+  (( named )) && [[ "$STATE" == installed && " ${LOOK_PARTS[*]} " == *" $id "* ]] && todo+=("$id")
   # login-shell depends on zsh: if zsh is about to be installed, offer it too
   [[ "$id" == login-shell && "$STATE" == n/a && " ${todo[*]} " == *" zsh "* ]] && todo+=("$id")
 done
