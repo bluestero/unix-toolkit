@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """k-appkey N [--dry]: what Super+N does for the Nth app in the dock.
 
-  app not running           -> launch it
-  running, not in front     -> bring its window to the front (a minimized one comes back)
-  running and in front      -> minimize that window
+  no window on this desktop -> launch it (a new window here; other desktops are left alone)
+  window here, not in front -> bring it to the front (a minimized one comes back)
+  window here, in front     -> minimize that window
 
 Pinned apps count from the left (the dock's favorites list), like GNOME's own Super+N.
 Needs the Window Calls GNOME extension (./install.sh window-calls) to see and move
@@ -74,9 +74,10 @@ def main():
         return
     names = window_classes(path, app_id)
     wins = windows()
-    mine = [w for w in (wins or []) if w["wm_class"].lower() in names or w["wm_class_instance"].lower() in names]
+    mine = [w for w in (wins or []) if w["in_current_workspace"]
+            and (w["wm_class"].lower() in names or w["wm_class_instance"].lower() in names)]
     if wins is None or not mine:
-        action = ["gio", "launch", path]          # not running, or no Window Calls: GNOME raises it itself
+        action = ["gio", "launch", path]          # none on this desktop, or no Window Calls: GNOME raises it itself
     else:
         front = [w for w in mine if w["focus"]]
         if front:
