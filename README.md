@@ -201,8 +201,11 @@ Not an installer step: set it up when you need it, with `hat`.
 A GitHub account is its commit name and email plus its SSH key; its own small ssh config
 offers that key first, so plain `git@github.com:` remotes sign in as that account. `.envrc`
 files hat writes start with `source_up_if_exists`, so a repo's own `.envrc` doesn't drop its
-parent folder's hat. In `hat ls` and `ws ls`: `↑` from a parent folder, `⇄` from the repo's
-remote (an `includeIf "hasconfig:remote…"` rule pointing at an account file), `–` the default.
+parent folder's hat. A hat on a folder inside another one wins there.
+
+`hat` lists every folder wearing a hat, however it got it (hat, `okcli pin`, or an `.envrc`
+you wrote). In `hat ls` and `ws ls`: `↑` from a parent folder, `⇄` set in the repo itself
+(its own git config), `–` the default.
 
 ## Pin, switch, default (AWS and Kubernetes work the same way)
 

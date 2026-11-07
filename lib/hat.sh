@@ -15,7 +15,6 @@
 #   hat_aws_profiles         one profile per line
 
 HAT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hat"
-HAT_FOLDERS="$HAT_DIR/folders"
 HAT_GH="$HAT_DIR/github"
 HAT_CLAUDE="${CLAUDE_PROFILES_DIR:-$HOME/.claude-profiles}"
 
@@ -89,7 +88,7 @@ hat_get() {
 }
 
 # hat_cells <dir>: the three values for a table, coloured: name (set here),
-# name ↑ (from a parent folder), name ⇄ (from the repo's remote), – (default)
+# name ↑ (from a parent folder), name ⇄ (set in the repo itself: its own git config, or a remote rule), – (default)
 hat_cells() {
   local d v f out=() i
   local -a x

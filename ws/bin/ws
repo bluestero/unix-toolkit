@@ -303,7 +303,7 @@ ws_ls() {
   local b=$C_BOLD r=$C_RESET
   { printf '%s\n' "  ${b}WORKSPACE${r}$S${b}FOLDER${r}$S${b}CLAUDE${r}$S${b}GITHUB${r}$S${b}AWS${r}"; rows | cut -d"$S" -f2-; } |
     ui_table "ws · workspaces" "$(ui_mark_here) open in $(ide_field "$ide" 4)" \
-      "${C_DIM}Claude, GitHub, AWS: set with hat · ↑ from a parent folder · ⇄ from the repo's remote · – the default${C_RESET}"
+      "${C_DIM}Claude, GitHub, AWS: set with hat · ↑ from a parent folder · ⇄ set in the repo itself · – the default${C_RESET}"
 }
 
 usage() {

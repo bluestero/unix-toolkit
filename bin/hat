@@ -18,10 +18,18 @@ kind_values() { case $1 in claude) hat_claude_profiles ;; github) hat_github_acc
 abs() { local p=${1:-$PWD}; [[ $p == "~"* ]] && p="$HOME${p:1}"; realpath -m -- "$p"; }
 
 # ------------------------------------------------------------- folders ---
-# The folders the panel lists: the ones you gave a hat (and that still exist).
-folders() { [[ -r $HAT_FOLDERS ]] && while IFS= read -r d; do [[ -d $d ]] && echo "$d"; done <"$HAT_FOLDERS"; return 0; }
-register() { folders | grep -Fxq "$1" || { mkdir -p "$HAT_DIR"; echo "$1" >>"$HAT_FOLDERS"; }; }
-unregister() { [[ -f $HAT_FOLDERS ]] && grep -Fxv "$1" "$HAT_FOLDERS" >"$HAT_FOLDERS.tmp"; mv -f "$HAT_FOLDERS.tmp" "$HAT_FOLDERS" 2>/dev/null; return 0; }
+# Every folder wearing a hat, however it got it: GitHub rules in ~/.gitconfig, and
+# the .envrc files direnv has allowed that set CLAUDE_CONFIG_DIR or AWS_PROFILE
+# (hat, okcli pin, or by hand).
+folders() {
+  local f
+  {
+    hat_git_rules | cut -f1
+    cat "${XDG_DATA_HOME:-$HOME/.local/share}"/direnv/allow/* 2>/dev/null | sort -u | while IFS= read -r f; do
+      [[ -f $f ]] && grep -Eq '^export (CLAUDE_CONFIG_DIR|AWS_PROFILE)=' "$f" && dirname "$f"
+    done
+  } | while IFS= read -r f; do [[ -d $f ]] && echo "$f"; done | sort -u
+}
 # a pin in ~ (or /) would apply everywhere: that's what the defaults are for
 check_dir() {
   [[ -d $1 ]] || die "No folder $(tilde "$1")"
@@ -43,26 +51,33 @@ envrc_unset() {   # <dir> <VAR>
   [[ -f $f ]] || return 0
   sed -i "/^export $2=/d" "$f"
   # nothing left but the line hat added: the file goes
-  if ! grep -v '^[[:space:]]*\(#.*\)\{0,1\}$' "$f" | grep -qv '^source_up_if_exists  # hat'; then rm -f "$f"
+  if ! grep -v -e '^[[:space:]]*\(#.*\)\{0,1\}$' -e '^source_up_if_exists  # hat' "$f" >/dev/null; then rm -f "$f"
   else direnv_allow "$1"; fi
 }
 
 # ------------------------------------------------------------------ set ---
 set_one() {   # <dir> <kind> <value or empty = back to the default>
   local d=$1 k=$2 v=$3 key
-  if [[ -n $v ]] && ! kind_values "$k" | grep -Fxq -- "$v"; then
+  if [[ -n $v ]] && ! grep -Fxq -- "$v" <<<"$(kind_values "$k")"; then
     die "No $(kind_label "$k") '$v' · see: $([[ $k == aws ]] && echo "okcli ls" || echo "hat $k")"
   fi
   case $k in
     claude) if [[ -n $v ]]; then envrc_set "$d" CLAUDE_CONFIG_DIR "\"${HAT_CLAUDE/#$HOME/\$HOME}/$v\""; else envrc_unset "$d" CLAUDE_CONFIG_DIR; fi ;;
     aws)    if [[ -n $v ]]; then envrc_set "$d" AWS_PROFILE "$v"; else envrc_unset "$d" AWS_PROFILE; fi ;;
     github)
-      key="includeIf.gitdir:$d/"
-      git config --global --remove-section "$key" 2>/dev/null
-      [[ -n $v ]] && git config --global "$key.path" "$(tilde "$HAT_GH/$v.gitconfig")" ;;
+      # git applies the rules in file order, the last match winning: written again
+      # shortest folder first, so a folder inside another one keeps its own account
+      local rules f a
+      rules=$(hat_git_rules | awk -F'\t' -v d="$d" '$1 != d')
+      [[ -n $v ]] && rules+=$'\n'"$d"$'\t'"$v"
+      while IFS=$'\t' read -r f a; do git config --global --remove-section "includeIf.gitdir:$f/" 2>/dev/null; done < <(hat_git_rules)
+      git config --global --remove-section "includeIf.gitdir:$d/" 2>/dev/null
+      while IFS=$'\t' read -r f a; do
+        [[ -n $f ]] && git config --global "includeIf.gitdir:$f/.path" "$(tilde "$HAT_GH/$a.gitconfig")"
+      done < <(awk -F'\t' 'NF { print length($1) "\t" $0 }' <<<"$rules" | sort -n | cut -f2-) ;;
   esac
-  if [[ -n $v ]]; then register "$d"; ok "$(tilde "$d"): $(kind_label "$k") → $v"
-  else has_any "$d" || unregister "$d"; ok "$(tilde "$d"): $(kind_label "$k") → the default"; fi
+  if [[ -n $v ]]; then ok "$(tilde "$d"): $(kind_label "$k") → $v"
+  else ok "$(tilde "$d"): $(kind_label "$k") → the default"; fi
 }
 
 # true when the folder still has any hat of its own
@@ -83,21 +98,25 @@ cmd_set() {   # [dir] [claude=x] [github=y] [aws=z]
 
 cmd_off() {   # [dir]: take every hat off
   local d k; d=$(abs "${1:-}")
-  has_any "$d" || { unregister "$d"; info "$(tilde "$d") has no hat of its own."; return 0; }
+  has_any "$d" || { info "$(tilde "$d") has no hat of its own."; return 0; }
   confirm "Take $(tilde "$d")'s Claude profile, GitHub account and AWS profile off? (back to the defaults)" n || return 0
   for k in "${KINDS[@]}"; do set_one "$d" "$k" "" >/dev/null 2>&1; done
-  unregister "$d"; ok "$(tilde "$d"): back to the defaults"
+  ok "$(tilde "$d"): back to the defaults"
 }
 
 # --------------------------------------------------------------- tables ---
-legend() { printf '%s' "${C_DIM}↑ from a parent folder · ⇄ from the repo's remote · – the default${C_RESET}"; }
+legend() { printf '%s' "${C_DIM}↑ from a parent folder · ⇄ set in the repo itself · – the default${C_RESET}"; }
 head_row() { printf '%s\n' "  ${C_BOLD}FOLDER${C_RESET}$S${C_BOLD}CLAUDE${C_RESET}$S${C_BOLD}GITHUB${C_RESET}$S${C_BOLD}AWS${C_RESET}"; }
 # <abs path><TAB>table row, the current folder first (● when it isn't listed)
 folder_rows() {
-  local d here; here=$(abs "$PWD")
-  folders | grep -Fxq "$here" || [[ $here == "$HOME" ]] ||
+  local d here list m; here=$(abs "$PWD"); list=$(folders)
+  grep -Fxq "$here" <<<"$list" || [[ $here == "$HOME" ]] ||
     printf '%s\t%s\n' "$here" "$(ui_mark_here) $(tilde "$here")$S$(hat_cells "$here")"
-  while IFS= read -r d; do printf '%s\t%s\n' "$d" "  $(tilde "$d")$S$(hat_cells "$d")"; done < <(folders)
+  while IFS= read -r d; do
+    [[ -n $d ]] || continue
+    m="  "; [[ $d == "$here" ]] && m="$(ui_mark_here) "
+    printf '%s\t%s\n' "$d" "$m$(tilde "$d")$S$(hat_cells "$d")"
+  done <<<"$list"
 }
 
 cmd_ls() {
@@ -135,7 +154,7 @@ edit_folder() {   # change one folder's hats, one kind at a time
   local d=$1 k v x
   while :; do
     IFS=$'\x1f' read -r -a x <<<"$(hat_cells "$d")"
-    k=$(printf '%s\t%s\n' claude "  Claude profile$S${x[0]}" github "  GitHub account$S${x[1]}" aws "  AWS profile$S${x[2]}" |
+    k=$(printf '%s\t  %-16s %s\n' claude "Claude profile" "${x[0]}" github "GitHub account" "${x[1]}" aws "AWS profile" "${x[2]}" |
       ui_fzf "hat · $(tilde "$d")" --delimiter='\t' --with-nth=2 --prompt='change> ' \
         --header="$(tilde "$d") · enter: change · esc: back" | cut -f1) || return 0
     [[ -n $k ]] || return 0
@@ -163,9 +182,9 @@ panel() {
   local out key d MSG=""
   while :; do
     out=$({ printf '\t%s\n' "$(head_row)"; folder_rows; } |
-      ui_fzf "hat · folders" --delimiter='\t' --with-nth=2 --header-lines=1 --prompt='folder> ' \
+      ui_fzf "hat · folders" --sortable --delimiter='\t' --with-nth=2 --header-lines=1 --prompt='folder> ' \
         --expect=alt-a,ctrl-x,alt-c,alt-g $(foot) \
-        --header='enter: change · alt-a: add a folder · ctrl-x: take off · alt-c: Claude profiles · alt-g: GitHub accounts') || return 0
+        --header='enter: change · alt-a: add a folder · ctrl-x: take off · alt-c: Claude profiles · alt-g: GitHub accounts · ↑: from a parent folder · ⇄: set in the repo itself · –: the default') || return 0
     MSG=""
     key=$(sed -n 1p <<<"$out"); d=$(sed -n 2p <<<"$out" | cut -f1)
     case $key in
@@ -208,7 +227,7 @@ acct_rows() {   # <kind>: <name><TAB>table row
 accounts() {   # <kind>: the profiles/accounts panel
   local k=$1 out key v MSG=""
   while :; do
-    out=$(acct_rows "$k" | ui_fzf "hat · $(kind_label "$k")s" --delimiter='\t' --with-nth=2 --header-lines=1 \
+    out=$(acct_rows "$k" | ui_fzf "hat · $(kind_label "$k")s" --sortable --delimiter='\t' --with-nth=2 --header-lines=1 \
       --prompt="$k> " --expect=alt-a,ctrl-x $(foot) --header='alt-a: add · ctrl-x: remove · esc: back') || return 0
     key=$(sed -n 1p <<<"$out"); v=$(sed -n 2p <<<"$out" | cut -f1); MSG=""
     case $key in
