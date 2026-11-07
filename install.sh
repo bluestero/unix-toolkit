@@ -86,6 +86,18 @@ for id in "${wanted[@]}"; do
   # login-shell depends on zsh: if zsh is about to be installed, offer it too
   [[ "$id" == login-shell && "$STATE" == n/a && " ${todo[*]} " == *" zsh "* ]] && todo+=("$id")
 done
+# Naming only installed look components (their settings menu): no table, heading or summary, just the menu.
+quick=0
+if (( named )) && (( ${#todo[@]} == named )); then
+  quick=1
+  for id in "${todo[@]}"; do [[ " ${LOOK_PARTS[*]} " == *" $id "* ]] || quick=0; done
+fi
+if (( quick )); then
+  ok_pad=""
+  if [[ "$mode" == ask && "${WORK_TOOLKIT_PLAIN:-0}" != 1 ]]; then use_gum || true; fi
+  for id in "${todo[@]}"; do "$(fn install "$id")"; done
+  exit 0
+fi
 say ""
 if (( ${#todo[@]} )); then right="${#todo[@]} to set up"; else right="${G}all set${R}"; fi
 printf '%s' "$table" | ui_table "work toolkit" "$right"
@@ -164,8 +176,8 @@ done
 printf '%s' "$summary" | print_table 3 | sed 's/\x1b\[[0-9;]*m//g' >>"$log_file"
 if [[ -t 1 ]]; then
   printf '%s' "$summary" | print_table 3 |
-    ui_box "done" "open a new terminal to pick it up" 0 "$(ui_hint "undo: ./uninstall.sh · log: ${log_file/#$HOME/\~}")"
-  say "${D}Separate Claude, GitHub or AWS accounts for some folders? ${R}${B}hat${R}${D} sets them up (not an installer step).${R}"
+    ui_box "done" "open a new terminal to pick it up" 0 "$(ui_hint "undo: ./uninstall.sh")"
+  say "${D}log: ${log_file/#$HOME/\~}${R}"
 else
   printf '%s' "$summary" | print_table 3
 fi

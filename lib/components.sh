@@ -724,7 +724,7 @@ look_menu() {
     dry) say "  ${C}?${R} $nice settings $state ${D}(dry run: not asked)${R}"; return 0 ;;
     yes) look_applied "$path" "$file" "$ign" && { ok "look already applied"; return 0; }; pick=$app ;;
     *)
-      if ! command -v fzf >/dev/null || [[ ! -t 0 ]]; then ok "settings kept"; return 0; fi
+      if ! command -v fzf >/dev/null || [[ ! -t 0 ]]; then ok "$nice settings kept"; return 0; fi
       rows="$keep"$'
 '"$app"$'
 '"$rst"; [[ -f $last ]] && rows+=$'
@@ -735,12 +735,12 @@ look_menu() {
   esac
   case "$pick" in
     "$app") mkdir -p "$orig_dir"; dconf dump "$path" >"$last" 2>/dev/null
-            look_apply "$path" "$file" "$name" && ok "look applied ${D}(the menu can undo it)${R}" ;;
+            look_apply "$path" "$file" "$name" && ok "$nice look applied ${D}(the menu can undo it)${R}" ;;
     "$rst") ask "Reset $nice to the app's defaults? (the menu can undo it)" n || { skip; return 0; }
             mkdir -p "$orig_dir"; dconf dump "$path" >"$last" 2>/dev/null
             dconf reset -f "$path" && ok "$nice settings back to the app's defaults ${D}(the menu can undo it)${R}" ;;
-    "$und") dconf reset -f "$path"; dconf load "$path" <"$last" && rm -f "$last" && ok "settings back to before the last change" ;;
-    *) ok "settings kept" ;;
+    "$und") dconf reset -f "$path"; dconf load "$path" <"$last" && rm -f "$last" && ok "$nice settings back to before the last change" ;;
+    *) ok "$nice settings kept" ;;
   esac
 }
 # A GNOME extension from extensions.gnome.org plus its look. gx_state UUID PATH FILE [IGNORE];
@@ -1068,7 +1068,7 @@ state_dash_to_panel() { NOTE=""
   else STATE=missing; fi; }
 install_dash_to_panel() {
   if dtp_present && dtp_enabled; then
-    look_menu "$dtp_path" "$dtp_src/settings.dconf" dash-to-panel "The bar" "$dtp_ignore"
+    look_menu "$dtp_path" "$dtp_src/settings.dconf" dash-to-panel "Dash to Panel" "$dtp_ignore"
     return
   fi
   ask "Merge the dock and top bar into one bar (Dash to Panel)?" n || { skip; return; }

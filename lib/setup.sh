@@ -19,8 +19,8 @@ B=$C_BOLD D=$C_DIM G=$C_GREEN Y=$C_YELLOW Rd=$C_RED C=$C_CYAN R=$C_RESET
 
 logf() { printf '%s\n' "$*" >>"$log_file"; }
 say()  { printf '%s\n' "$*"; printf '%s\n' "$*" | sed 's/\x1b\[[0-9;]*m//g' >>"$log_file"; }
-ok()   { say "      ${G}✓${R} $*"; }
-skip() { say "      ${D}– skipped${R}${1:+ ($1)}"; }
+ok()   { say "${ok_pad-      }${G}✓${R} $*"; }
+skip() { say "${ok_pad-      }${D}– skipped${R}${1:+ ($1)}"; }
 warn() { say "      ${Y}!${R} $*"; }
 fail() { say "      ${Rd}✗${R} $*"; }
 dry()  { [[ "$mode" == dry ]]; }
