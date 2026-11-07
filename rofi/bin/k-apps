@@ -1,0 +1,107 @@
+#!/usr/bin/env -S python3 -I
+"""k-apps: rofi's "apps" tab (script mode, started by k-launch): the windows you have
+open come first, then every installed app. Pick a window to bring it to the front,
+an app to start it. (Rofi's own window list only sees X11 windows, not GNOME's
+Wayland ones, so the windows come from the Window Calls extension.)"""
+import glob, json, os, subprocess, sys
+
+GDBUS = ["gdbus", "call", "--session", "--dest", "org.gnome.Shell",
+         "--object-path", "/org/gnome/Shell/Extensions/Windows", "--method"]
+DIRS = [os.path.expanduser("~/.local/share/applications"),
+        os.path.expanduser("~/.local/share/flatpak/exports/share/applications"),
+        "/var/lib/flatpak/exports/share/applications",
+        "/usr/local/share/applications", "/usr/share/applications",
+        "/var/lib/snapd/desktop/applications"]
+
+
+def desktop_entries():
+    seen, out = set(), []
+    for d in DIRS:                      # earlier directories win, like XDG
+        for path in sorted(glob.glob(d + "/*.desktop")):
+            did = os.path.basename(path)
+            if did in seen:
+                continue
+            seen.add(did)
+            kv = {}
+            try:
+                section = False
+                for line in open(path, encoding="utf-8", errors="ignore"):
+                    line = line.strip()
+                    if line.startswith("["):
+                        section = line == "[Desktop Entry]"
+                    elif section and "=" in line:
+                        k, v = line.split("=", 1)
+                        kv.setdefault(k.strip(), v.strip())
+            except OSError:
+                continue
+            if kv.get("Type", "Application") != "Application" or "Name" not in kv:
+                continue
+            if kv.get("NoDisplay") == "true" or kv.get("Hidden") == "true":
+                continue
+            only = kv.get("OnlyShowIn")
+            if only and "GNOME" not in only.split(";"):
+                continue
+            if "GNOME" in kv.get("NotShowIn", "").split(";"):
+                continue
+            out.append((did, path, kv))
+    return out
+
+
+def windows():
+    try:
+        o = subprocess.run(GDBUS + ["org.gnome.Shell.Extensions.Windows.List"],
+                           capture_output=True, text=True, timeout=3).stdout
+        return json.loads(o[o.index("'") + 1:o.rindex("'")])
+    except Exception:
+        return []
+
+
+def row(label, info, icon="", meta=""):
+    label = label.replace("\n", " ")
+    ex = ["info\x1f" + info]
+    if icon:
+        ex.append("icon\x1f" + icon)
+    if meta:
+        ex.append("meta\x1f" + meta)
+    return label + "\0" + "\x1f".join(ex)
+
+
+def listing():
+    apps = desktop_entries()
+    by_class = {}                      # window class -> (name, icon)
+    for did, _, kv in apps:
+        icon = kv.get("Icon", "")
+        for key in (did[:-8].lower(), kv.get("StartupWMClass", "").lower()):
+            if key:
+                by_class.setdefault(key, (kv["Name"], icon))
+    print("\0no-custom\x1ftrue")
+    for w in windows():
+        cls = str(w.get("wm_class", ""))
+        if cls.lower() in ("rofi", "") or w.get("window_type") not in (0, None):
+            continue
+        name, icon = by_class.get(cls.lower(), (cls, cls.lower()))
+        title = str(w.get("title", ""))
+        label = f"{name}  ·  {title}" if title and title != name else name
+        print(row(label, f"w:{w['id']}", icon, f"{cls} window open"))
+    for did, path, kv in sorted(apps, key=lambda e: e[2]["Name"].lower()):
+        meta = " ".join(filter(None, [kv.get("GenericName", ""), kv.get("Keywords", "").replace(";", " "),
+                                      kv.get("Comment", "")]))
+        print(row(kv["Name"], "a:" + path, kv.get("Icon", ""), meta))
+
+
+def main():
+    arg = sys.argv[1] if len(sys.argv) > 1 else ""
+    info = os.environ.get("ROFI_INFO", "")
+    if not arg:
+        listing()
+    elif info.startswith("w:"):
+        subprocess.run(GDBUS + ["org.gnome.Shell.Extensions.Windows.Activate", info[2:]],
+                       capture_output=True)
+    elif info.startswith("a:"):
+        subprocess.Popen(["gio", "launch", info[2:]], start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        listing()
+
+
+main()

@@ -1,0 +1,30 @@
+# Backups the installers and tools make next to files they change
+*.bak
+*.bak-*
+*.kx-bak
+*-backup.zip
+services.bak-*/
+
+# Anything with keys or credentials (a layer may stage a GitHub key in .ssh-github)
+.ssh-github/
+*.pem
+id_rsa*
+id_ed25519*
+.env
+.env.*
+
+# Generated / local
+*.log
+__pycache__/
+*.pyc
+.venv/
+.venvs/
+.DS_Store
+
+# Layers: each is its own repo, cloned here by tk layer add (lib/layers.sh)
+/layers/
+
+# Personal notes, kept next to the code but not in git
+/PLAN-*.md
+/TICKET-*.md
+/gnome-setup-notes.md

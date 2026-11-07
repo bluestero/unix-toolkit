@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# k-icon: pick the kitty app icon (the launcher/dock icon). `k-icon help` lists the commands.
+# The icons come from kitty/install-kitty-icons.sh (./install.sh kitty-icons).
+set -uo pipefail
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+# shellcheck source=../../lib/ui.sh
+. "$(cd "$(dirname "$SELF")/../.." && pwd)/lib/ui.sh"
+
+ICON_DIR="$HOME/.local/share/icons/kitty-custom"
+DESKTOP="$HOME/.local/share/applications/kitty.desktop"
+
+need_setup() {
+  [[ -f "$DESKTOP" && -d "$ICON_DIR" ]] || die "kitty icons aren't set up · run: ./install.sh kitty-icons"
+}
+names() { find "$ICON_DIR" -maxdepth 1 -type f -name '*.png' -printf '%f\n' 2>/dev/null | sed 's/\.png$//' | sort; }
+current() { basename "$(grep -m1 '^Icon=' "$DESKTOP" | cut -d= -f2-)" .png; }
+
+set_icon() {
+  local icon="$ICON_DIR/$1.png"
+  [[ -f "$icon" ]] || ui_unknown k-icon "$1" icon
+  sed -i "s|^Icon=.*|Icon=$icon|" "$DESKTOP"
+  update-desktop-database "$HOME/.local/share/applications/" 2>/dev/null
+  ok "Kitty icon ${C_BOLD}$1${C_RESET}  ${C_DIM}the dock may take a moment to notice${C_RESET}"
+}
+
+# one row per icon, "● name" for the one in use
+rows() {
+  local cur n; cur=$(current)
+  while IFS= read -r n; do
+    if [[ "$n" == "$cur" ]]; then printf '%s\n' "$(ui_mark_here) ${C_BOLD}$n${C_RESET}"; else printf '  %s\n' "$n"; fi
+  done < <(names)
+}
+
+cmd_ls() {
+  [[ -t 1 ]] || ui_no_color
+  { printf '%s\n' "  ${C_BOLD}ICON${C_RESET}"; rows; } | ui_table "k-icon · kitty icons" "$(ui_mark_here) in use"
+}
+
+cmd_pick() {
+  if [[ ! -t 0 || ! -t 1 ]] || ! command -v fzf >/dev/null; then cmd_ls; return; fi
+  local sel
+  sel=$(rows | ui_fzf 'k-icon · kitty icons' --prompt='icon> ' --header='enter: use it · esc: cancel') || return 0
+  sel=$(strip_ansi "$sel"); sel=${sel#● }; sel=${sel#  }
+  [[ -n "$sel" ]] && set_icon "$sel"
+}
+
+cmd_help() {
+  ui_help k-icon "kitty app icon" <<'EOF'
+k-icon	picker
+k-icon <name>	use an icon
+k-icon ls	every icon
+k-icon current	the icon in use, name only
+k-icon help	this page
+
+Icons live in ~/.local/share/icons/kitty-custom (./install.sh kitty-icons).
+EOF
+}
+
+case "${1:-}" in
+  help|-h|--help) cmd_help ;;
+  "")             need_setup; cmd_pick ;;
+  ls|list)        need_setup; cmd_ls ;;
+  cur|current)    need_setup; current ;;
+  __names)        names ;;
+  -*)             ui_unknown k-icon "$1" ;;
+  *)              need_setup; set_icon "$1" ;;
+esac

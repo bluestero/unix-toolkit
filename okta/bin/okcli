@@ -1,0 +1,988 @@
+#!/usr/bin/env bash
+# okcli - friendly AWS profile manager on top of okta-aws-cli.
+#
+# Profiles live in ~/.okta/okta.yaml (the same file okta-aws-cli reads).
+# Credentials land in ~/.aws/credentials under each profile's short name.
+# Switching profiles needs the shell wrapper from shell/okcli.sh, because a
+# child process can't change the parent shell's environment.
+
+set -uo pipefail
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+ROOT="$(cd "$(dirname "$SELF")/../.." && pwd)"
+# shellcheck source=../../lib/ui.sh
+. "$ROOT/lib/ui.sh"
+UI_EVAL_FILE="${OKCLI_EVAL_FILE:-}"
+
+OKCLI_VERSION="1.1.0"
+OKTA_YAML="${OKCLI_OKTA_YAML:-$HOME/.okta/okta.yaml}"
+AWS_CREDS="${AWS_SHARED_CREDENTIALS_FILE:-$HOME/.aws/credentials}"
+STATE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/okcli"
+# The profile new terminals start on. Set explicitly with 'okcli default'.
+DEFAULT_FILE="$STATE_DIR/default"
+# v1.0 kept "the last non-prod profile you switched to" here; adopt it once.
+if [[ ! -e "$DEFAULT_FILE" && -f "$STATE_DIR/current" ]]; then
+  mv "$STATE_DIR/current" "$DEFAULT_FILE" 2>/dev/null
+fi
+# Non-prod detection (is_prod, env_badge) comes from lib/ui.sh; override the
+# pattern with OKCLI_NONPROD_PATTERN.
+
+# --------------------------------------------------------------- parsing ---
+
+# Prints one TSV row per profile in okta.yaml:
+#   name  account_id  account_label  role_name  idp_arn  role_arn
+profiles_tsv() {
+  [[ -r "$OKTA_YAML" ]] || return 0
+  awk '
+    function indent(s) { match(s, /^ */); return RLENGTH }
+    function unquote(s) { gsub(/^[ \t"]+|[ \t"]+$/, "", s); return s }
+    {
+      line = $0
+      sub(/[ \t]+#.*$/, "", line)
+      if (line ~ /^[ \t]*(#.*)?$/) next
+      ind = indent(line)
+      if (sect != "" && ind <= sind) sect = ""
+      if (sect == "" && line ~ /^ *(profiles|idps): *$/) {
+        sect = line; gsub(/[ :]/, "", sect); sind = ind; eind = -1; name = ""
+        next
+      }
+      if (sect == "") next
+      if (eind < 0) eind = ind
+      if (sect == "profiles") {
+        if (ind == eind) {
+          name = line; sub(/:[ \t]*$/, "", name); name = unquote(name)
+          order[++n] = name
+        } else if (name != "") {
+          key = line; sub(/^ +/, "", key)
+          val = key; sub(/:.*/, "", key); sub(/^[^:]*:/, "", val)
+          if (key == "aws-iam-idp")  idp[name]  = unquote(val)
+          if (key == "aws-iam-role") role[name] = unquote(val)
+        }
+      } else if (sect == "idps" && ind == eind) {
+        split(line, parts, ":")
+        lbl = line; sub(/^.*:[ \t]*/, "", lbl)
+        label[parts[5]] = unquote(lbl)
+      }
+    }
+    END {
+      for (i = 1; i <= n; i++) {
+        p = order[i]; r = role[p]
+        split(r, parts, ":"); acct = parts[5]
+        rn = r; sub(/^.*role\//, "", rn)
+        lbl = (acct in label) ? label[acct] : acct
+        printf "%s\t%s\t%s\t%s\t%s\t%s\n", p, acct, lbl, rn, idp[p], r
+      }
+    }
+  ' "$OKTA_YAML"
+}
+
+# Prints "account_id<TAB>label" for every account in the idps: section.
+accounts_tsv() {
+  [[ -r "$OKTA_YAML" ]] || return 0
+  awk '
+    /^ *idps: *$/ { on = 1; match($0, /^ */); sind = RLENGTH; next }
+    on {
+      match($0, /^ */)
+      if (RLENGTH <= sind && $0 !~ /^ *$/) { on = 0; next }
+      split($0, parts, ":")
+      if (parts[5] == "") next
+      lbl = $0; sub(/^.*:[ \t]*/, "", lbl); gsub(/"/, "", lbl)
+      printf "%s\t%s\n", parts[5], lbl
+    }
+  ' "$OKTA_YAML"
+}
+
+profile_names() { profiles_tsv | cut -f1; }
+
+profile_row() {
+  local name="$1"
+  profiles_tsv | awk -F'\t' -v n="$name" '$1 == n { print; found = 1 } END { exit !found }'
+}
+
+require_profile() {
+  profile_row "$1" >/dev/null || die "No profile named '$1' · see: okcli ls"
+}
+
+# Expiry timestamp written by okta-aws-cli (x_security_token_expires).
+expiry_of() {
+  [[ -r "$AWS_CREDS" ]] || return 0
+  awk -v n="$1" '
+    /^\[/ { sec = $0; gsub(/[][ ]/, "", sec); next }
+    sec == n && /^[ \t]*x_security_token_expires/ {
+      sub(/^[^=]*=[ \t]*/, ""); print; exit
+    }
+  ' "$AWS_CREDS"
+}
+
+# Seconds left on a profile's credentials (negative or empty = expired/missing).
+seconds_left() {
+  local exp ts
+  exp=$(expiry_of "$1")
+  [[ -n "$exp" ]] || return 0
+  ts=$(date -d "$exp" +%s 2>/dev/null) || return 0
+  echo $((ts - $(date +%s)))
+}
+
+is_fresh() {
+  local s
+  s=$(seconds_left "$1")
+  [[ -n "$s" && "$s" -gt 60 ]]
+}
+
+status_text() {
+  local s h m
+  s=$(seconds_left "$1")
+  if [[ -z "$s" ]]; then printf '%s' "${C_DIM}no creds${C_RESET}"; return; fi
+  if (( s <= 0 )); then printf '%s' "${C_RED}✗ expired${C_RESET}"; return; fi
+  h=$((s / 3600)); m=$((s % 3600 / 60))
+  if (( s < 1800 )); then printf '%s' "${C_YELLOW}! ${m}m left${C_RESET}"
+  else printf '%s' "${C_GREEN}✓ ${h}h${m}m left${C_RESET}"; fi
+}
+
+# -------------------------------------------------------------- commands ---
+
+get_default() { [[ -r "$DEFAULT_FILE" ]] && head -n1 "$DEFAULT_FILE"; return 0; }
+
+project_root() { git rev-parse --show-toplevel 2>/dev/null || pwd; }
+
+# The profile pinned to the current repo via 'okcli pin', if any.
+repo_pin() {
+  local envrc
+  envrc="$(project_root)/.envrc"
+  [[ -r "$envrc" ]] || return 0
+  sed -n 's/^export AWS_PROFILE=\([^ ]*\).*/\1/p' "$envrc" | tail -n1
+}
+
+S=$'\x1f'
+
+# The profile table (header + rows); boxed by `okcli ls`, bare inside the picker.
+profile_rows() {
+  local current="${AWS_PROFILE:-}" rows name acct label role first note default pin
+  rows=$(profiles_tsv)
+  [[ -n "$rows" ]] || { warn "No profiles in $OKTA_YAML yet · see: okcli sync"; return 1; }
+  default=$(get_default); pin=$(repo_pin)
+  h() { printf '%s' "$C_BOLD$1$C_RESET"; }
+  printf '%s\n' "  $(h PROFILE)$S$(h ACCOUNT)$S$(h ROLE)$S$(h ENV)$S$(h SESSION)"
+  while IFS=$'\t' read -r name acct label role _ _; do
+    if [[ "$name" == "$current" ]]; then first="$(ui_mark_here) ${C_BOLD}$name${C_RESET}"
+    else first="  $name"; fi
+    [[ "$name" == "$default" ]] && first+=" $(ui_mark_default)"
+    [[ "$name" == "$pin" ]] && first+=" $(ui_mark_pin)"
+    printf "%s$S%s$S%s$S%s$S%s\n" "$first" "$label" "$role" "$(env_badge "$name $label")" "$(status_text "$name")"
+  done <<<"$rows"
+}
+
+# Footer: one fix for every expired session (not one per row).
+ls_footer() {
+  local n
+  n=$(strip_ansi "$1" | grep -c 'expired')
+  (( n )) && printf '%s%d expired%s %s' "$C_RED" "$n" "$C_RESET" "$(ui_hint 'okcli refresh')"
+}
+
+cmd_ls() {
+  [[ -t 1 ]] || ui_no_color
+  local t legend=(here default); t=$(profile_rows) || return 1
+  [[ -n "$(repo_pin)" ]] && legend+=(pin)
+  printf '%s\n' "$t" | ui_table "okcli · aws profiles" "$(ui_legend "${legend[@]}")" "$(ls_footer "$t")"
+}
+
+cmd_status() {
+  [[ -t 1 ]] || ui_no_color
+  local name="${AWS_PROFILE:-}" row acct label role default pin flag="" st
+  default=$(get_default); pin=$(repo_pin)
+  if [[ -z "$name" ]]; then
+    printf 'profile\t%s\n' "${C_DIM}none${C_RESET}  $(ui_hint okcli)" | ui_fields okcli; return
+  fi
+  if ! row=$(profile_row "$name"); then
+    printf 'profile\t%s\n' "${C_BOLD}$name${C_RESET}  ${C_DIM}not managed by okcli${C_RESET}" | ui_fields okcli; return
+  fi
+  IFS=$'\t' read -r _ acct label role _ _ <<<"$row"
+  is_prod "$name" "$label" && flag=$(ui_badge PROD)
+  st=$(status_text "$name")
+  is_fresh "$name" || st+="  $(ui_hint "okcli refresh $name")"
+  {
+    printf 'profile\t%s\n' "${C_BOLD}$name${C_RESET} $(env_badge "$name $label")"
+    printf 'account\t%s\n' "$label  ${C_DIM}$acct${C_RESET}"
+    printf 'role\t%s\n' "$role"
+    printf 'session\t%s\n' "$st"
+    if [[ "$default" == "$name" ]]; then printf 'new terminals\t%s\n' "${C_DIM}same${C_RESET}"
+    else printf 'new terminals\t%s\n' "${default:-${C_DIM}none${C_RESET}}"; fi
+    [[ -n "$pin" ]] && printf 'folder pin\t%s\n' "$pin  ${C_DIM}$(project_root | sed "s|^$HOME|~|")${C_RESET}"
+  } | ui_fields okcli "$flag"
+}
+
+# Interactive fzf picker. Prints "<key>\t<profile>" or nothing if cancelled.
+pick_profile() {
+  local header="$1" table pos out key sel
+  table=$(profile_rows) || return 1
+  # Start the cursor on the active profile (rows follow okta.yaml order), or
+  # on the first non-prod one so a stray Enter never lands you in prod.
+  pos=$(profile_names | awk -v p="${AWS_PROFILE:-}" '$0 == p { print NR; exit }')
+  if [[ -z "$pos" ]]; then
+    local i=0 name label
+    while IFS=$'\t' read -r name _ label _ _ _; do
+      i=$((i + 1))
+      is_prod "$name" "$label" || { pos=$i; break; }
+    done < <(profiles_tsv)
+  fi
+  out=$(printf '%s\n' "$table" | ui_fzf 'okcli · aws profiles' --sortable --header-lines=1 --prompt='profile> ' \
+    --header="$header" --expect=ctrl-r,ctrl-d --bind="load:pos(${pos:-1})") || return 1
+  key=$(sed -n 1p <<<"$out")
+  sel=$(strip_ansi "$(sed -n 2p <<<"$out")" | awk '{ print ($1 == "●") ? $2 : $1 }')
+  [[ -n "$sel" ]] && printf '%s\t%s\n' "${key:-enter}" "$sel"
+}
+
+cmd_pick() {
+  if [[ ! -t 1 || ! -t 0 ]] || ! command -v fzf >/dev/null; then cmd_ls; return; fi
+  local picked key name
+  picked=$(pick_profile "enter: switch · ctrl-r: refresh + switch · ctrl-d: make default · esc: cancel") || return 0
+  key=${picked%%$'\t'*}; name=${picked#*$'\t'}
+  case "$key" in
+    ctrl-d) set_default "$name"; return ;;
+    ctrl-r) refresh_profiles "$name" ;;
+  esac
+  do_switch "$name"
+}
+
+do_switch() {
+  local name="$1" row label role acct var
+  row=$(profile_row "$name") || die "No profile named '$name' · see: okcli ls"
+  IFS=$'\t' read -r _ acct label role _ _ <<<"$row"
+
+  if ! is_fresh "$name"; then
+    if confirm "Credentials for '$name' are expired or missing. Refresh now?"; then
+      refresh_profiles "$name" || warn "Refresh failed; switching anyway."
+    fi
+  fi
+
+  local code="export AWS_PROFILE=$(printf %q "$name")"
+  for var in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN; do
+    if [[ -n "${!var:-}" ]]; then
+      code+=$'\n'"unset $var"
+      warn "Unset $var (it would override the profile)."
+    fi
+  done
+
+  if ! emit_eval "$code"; then
+    warn "Shell wrapper not loaded, so your shell was not changed. Either:"
+    info "    source the okcli shell hook (see 'okcli help setup'), or"
+    info "    eval \"\$(okcli env $name)\""
+    return 1
+  fi
+  ok "Switched to ${C_BOLD}$name${C_RESET}  ($label / $role)  $(status_text "$name")"
+  if is_prod "$name" "$label"; then
+    warn "${C_RED}${C_BOLD}This is a PROD account.${C_RESET} Tread carefully."
+  fi
+  # A switch only affects this terminal; the default for new terminals is separate.
+  local default; default=$(get_default)
+  if [[ "$default" != "$name" ]]; then
+    info "${C_DIM}  This terminal only. New terminals start on ${default:-no profile} · okcli default $name${C_RESET}"
+  fi
+  return 0
+}
+
+set_default() {
+  local name="$1" row label
+  row=$(profile_row "$name") || die "No profile named '$name' · see: okcli ls"
+  IFS=$'\t' read -r _ _ label _ _ _ <<<"$row"
+  if is_prod "$name" "$label"; then
+    warn "'$name' is a ${C_RED}${C_BOLD}PROD${C_RESET} profile: every new terminal would start in prod."
+    confirm "Make it the default anyway?" n || { info "Default unchanged."; return 1; }
+  fi
+  mkdir -p "$STATE_DIR" && printf '%s\n' "$name" >"$DEFAULT_FILE"
+  ok "Default is now ${C_BOLD}$name${C_RESET}. New terminals start on it."
+  [[ "${AWS_PROFILE:-}" == "$name" ]] || info "${C_DIM}  This terminal is unchanged · okcli $name${C_RESET}"
+}
+
+cmd_default() {
+  case "${1:-}" in
+    "")
+      local d; d=$(get_default)
+      if [[ -n "$d" ]]; then printf '%s\n' "$d"
+      else info "No default: new terminals start with no profile · okcli default <profile>"; return 1; fi
+      ;;
+    off)
+      rm -f "$DEFAULT_FILE"
+      ok "Cleared the default. New terminals start with no profile."
+      ;;
+    *) set_default "$1" ;;
+  esac
+}
+
+cmd_off() {
+  emit_eval "unset AWS_PROFILE" || { info "Run: unset AWS_PROFILE"; return 1; }
+  ok "No profile in this terminal."
+}
+
+cmd_env() {
+  [[ $# -ge 1 ]] || die "Usage: okcli env <profile>"
+  require_profile "$1"
+  printf 'export AWS_PROFILE=%q\n' "$1"
+}
+
+cmd_current() { [[ -n "${AWS_PROFILE:-}" ]] && printf '%s\n' "$AWS_PROFILE"; }
+
+# Mirrors okta-aws-cli's own setting: env var first, then okta.yaml.
+browser_enabled() {
+  case "${OKTA_AWSCLI_OPEN_BROWSER:-}" in
+    true|1) return 0 ;;
+    false|0) return 1 ;;
+  esac
+  [[ -r "$OKTA_YAML" ]] && grep -qE '^[[:space:]]*open-browser:[[:space:]]*true' "$OKTA_YAML"
+}
+
+open_url() {
+  local opener
+  for opener in xdg-open open; do
+    command -v "$opener" >/dev/null || continue
+    nohup "$opener" "$1" >/dev/null 2>&1 &
+    return 0
+  done
+  return 1
+}
+
+# Runs okta-aws-cli once per profile. The first call may open the browser;
+# the rest reuse the cached Okta access token.
+refresh_profiles() {
+  local names=("$@") name row idp role out failed=0 first=1
+  command -v okta-aws-cli >/dev/null || die "okta-aws-cli is not installed."
+  for name in "${names[@]}"; do
+    row=$(profile_row "$name") || { warn "Skipping unknown profile '$name'."; failed=1; continue; }
+    IFS=$'\t' read -r _ _ _ _ idp role <<<"$row"
+    [[ -n "$idp" && -n "$role" ]] || { warn "$name: missing aws-iam-idp or aws-iam-role in okta.yaml"; failed=1; continue; }
+    local args=(web --profile "$name" --aws-iam-idp "$idp" --aws-iam-role "$role"
+      --format aws-credentials --aws-credentials "$AWS_CREDS" --write-aws-credentials --expiry-aws-variables --cache-access-token)
+    # Open the browser through okcli so Chrome's own log spam stays out of the
+    # terminal. okta-aws-cli splits this on spaces, so skip it for odd paths.
+    if browser_enabled && [[ "$SELF" != *" "* ]]; then
+      args+=(--open-browser-command "$SELF __open")
+    fi
+    if (( first )); then
+      info "${C_DIM}Authenticating with Okta (approve in the browser if asked)...${C_RESET}"
+      if okta-aws-cli "${args[@]}" >&2; then ok "$name  $(status_text "$name")"
+      else warn "$name: refresh failed"; failed=1; fi
+      first=0
+    elif out=$(okta-aws-cli "${args[@]}" 2>&1); then
+      ok "$name  $(status_text "$name")"
+    else
+      warn "$name: refresh failed"; printf '%s\n' "$out" | sed 's/^/    /' >&2; failed=1
+    fi
+  done
+  return $failed
+}
+
+cmd_refresh() {
+  local names=()
+  case "${1:-}" in
+    "") mapfile -t names < <(profile_names) ;;
+    --expired)
+      local n
+      while read -r n; do is_fresh "$n" || names+=("$n"); done < <(profile_names)
+      [[ ${#names[@]} -gt 0 ]] || { ok "Everything is fresh."; return 0; }
+      ;;
+    --current)
+      [[ -n "${AWS_PROFILE:-}" ]] || die "No active profile."
+      names=("$AWS_PROFILE")
+      ;;
+    *) names=("$@") ;;
+  esac
+  [[ ${#names[@]} -gt 0 ]] || die "No profiles to refresh. Add one with 'okcli sync'."
+  # Several at once: one Okta round trip for all of them.
+  if (( ${#names[@]} >= 3 )); then bulk_refresh "${names[@]}"; return; fi
+  refresh_profiles "${names[@]}"
+}
+
+# ------------------------------------------------------------- discovery ---
+#
+# okta-aws-cli --all-profiles returns every account+role you can use, in one
+# login, as sections named "<account-alias>-<IdP>-<Role>". okcli identifies each
+# one (sts get-caller-identity, cached in $SOURCES_FILE), names it with the
+# rules in $NAMING_FILE and writes the profiles to okta.yaml.
+
+IDP_NAME="${OKCLI_IDP_NAME:-Okta-IdP}"
+NAMING_FILE="$STATE_DIR/naming.conf"
+SOURCES_FILE="$STATE_DIR/sources"    # okta-aws-cli section name <TAB> role ARN
+
+write_default_naming() {
+  [[ -f "$NAMING_FILE" ]] && return 0
+  mkdir -p "$STATE_DIR"
+  # A layer can bring its org's rules (OKCLI_NAMING_DEFAULT in its shell/init.sh).
+  if [[ -r "${OKCLI_NAMING_DEFAULT:-}" ]]; then cp "$OKCLI_NAMING_DEFAULT" "$NAMING_FILE"; return 0; fi
+  cat >"$NAMING_FILE" <<'EOF'
+# okcli naming rules. A profile is named <account>-<role>, e.g. shop-dev-ro.
+# Edit these, then run 'okcli sync' again to apply.
+
+[account]
+# Text replacements on the AWS account alias, applied top to bottom,
+# e.g. "mycompany- =" drops your company prefix from every account.
+-account =
+management = mgmt
+platform = plat
+
+[role]
+# Whole role names. Anything not listed: drop Team/Access/Role, then kebab-case
+# (BillingAdmin -> billing-admin). Roles that already name an environment
+# (eks-shop-dev-admin) keep just their own name, without the account.
+ReadOnlyAccess = ro
+AdministratorAccess = admin
+PowerUserAccess = power
+LogAuditAccess = audit
+EOF
+}
+
+# naming_rules <section> → "from<TAB>to" lines
+naming_rules() {
+  awk -v want="[$1]" '
+    /^[ \t]*#/ || /^[ \t]*$/ { next }
+    /^\[/ { sec = $0; gsub(/[ \t]/, "", sec); next }
+    sec == want && index($0, "=") {
+      from = substr($0, 1, index($0, "=") - 1); to = substr($0, index($0, "=") + 1)
+      gsub(/^[ \t]+|[ \t]+$/, "", from); gsub(/^[ \t]+|[ \t]+$/, "", to)
+      print from "\t" to
+    }' "$NAMING_FILE"
+}
+
+short_account() {
+  local s="$1" from to
+  while IFS=$'\t' read -r from to; do [[ -n "$from" ]] && s=${s//"$from"/"$to"}; done < <(naming_rules account)
+  printf '%s' "$s"
+}
+
+short_role() {
+  local r="$1" from to
+  while IFS=$'\t' read -r from to; do
+    [[ "$r" == "$from" ]] && { printf '%s' "$to"; return; }
+  done < <(naming_rules role)
+  r=$(sed -E 's/(Team|Access|Role)$//; s/([a-z0-9])([A-Z])/\1-\2/g' <<<"$r" | tr '[:upper:]' '[:lower:]')
+  printf '%s' "$r"
+}
+
+# The okcli name for an account alias + role name.
+conventional_name() {
+  local alias="$1" role="$2" r
+  r=$(short_role "$role")
+  if [[ "$r" =~ (^|-)(dev|develop|test|qa|stage|staging|stg|uat|prod|production|prd)(-|$) ]]; then
+    printf '%s' "$r"
+  else
+    printf '%s-%s' "$(short_account "$alias")" "$r"
+  fi
+}
+
+ini_sections() { awk '/^\[/ { s = $0; gsub(/[][ \t]/, "", s); print s }' "$1"; }
+
+# Logs in once and writes every account+role to a private temp file; prints its path.
+fetch_all() {
+  local tmp idp args
+  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/okcli-all.XXXXXX") || die "Cannot create a temp file."
+  # Tests: use a prepared credentials file instead of signing in.
+  if [[ -n "${OKCLI_TEST_FETCH:-}" ]]; then cp "$OKCLI_TEST_FETCH" "$tmp"; printf '%s\n' "$tmp"; return; fi
+  command -v okta-aws-cli >/dev/null || die "okta-aws-cli is not installed."
+  idp=$(profiles_tsv | cut -f5 | grep -m1 . || true)
+  args=(web --all-profiles --format aws-credentials --write-aws-credentials --aws-credentials "$tmp"
+    --expiry-aws-variables --cache-access-token)
+  [[ -n "$idp" ]] && args+=(--aws-iam-idp "$idp")
+  if browser_enabled && [[ "$SELF" != *" "* ]]; then args+=(--open-browser-command "$SELF __open"); fi
+  info "${C_DIM}Signing in to Okta (approve in the browser if asked)...${C_RESET}"
+  if ! okta-aws-cli "${args[@]}" >/dev/null 2>"$tmp.err"; then
+    sed 's/^/    /' "$tmp.err" >&2; rm -f "$tmp" "$tmp.err"; return 1
+  fi
+  rm -f "$tmp.err"
+  [[ -s "$tmp" ]] || { rm -f "$tmp"; warn "Okta returned no roles."; return 1; }
+  printf '%s\n' "$tmp"
+}
+
+# For each section in a fetched file: "section<TAB>role-arn". Unknown sections
+# are identified in parallel with sts and cached.
+identify_sections() {
+  local file="$1" s unknown=()
+  mkdir -p "$STATE_DIR"; touch "$SOURCES_FILE"
+  while read -r s; do
+    grep -q "^$s"$'\t' "$SOURCES_FILE" || unknown+=("$s")
+  done < <(ini_sections "$file")
+  if (( ${#unknown[@]} )); then
+    command -v aws >/dev/null || die "The aws CLI is needed to identify roles."
+    info "${C_DIM}Identifying ${#unknown[@]} role(s)...${C_RESET}"
+    printf '%s\n' "${unknown[@]}" |
+      AWS_SHARED_CREDENTIALS_FILE="$file" AWS_CONFIG_FILE=/dev/null AWS_REGION=us-east-1 \
+      xargs -P 8 -I{} sh -c '
+        arn=$(env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
+              AWS_PROFILE="$1" aws sts get-caller-identity --query Arn --output text 2>/dev/null) || exit 0
+        acct=${arn#arn:aws:sts::}; acct=${acct%%:*}
+        role=${arn#*:assumed-role/}; role=${role%%/*}
+        printf "%s\tarn:aws:iam::%s:role/%s\n" "$1" "$acct" "$role"' _ {} >>"$SOURCES_FILE"
+    sort -u -o "$SOURCES_FILE" "$SOURCES_FILE"
+  fi
+  while read -r s; do grep -m1 "^$s"$'\t' "$SOURCES_FILE"; done < <(ini_sections "$file")
+}
+
+# Copies sections from a fetched file into AWS_CREDS under new names.
+#   merge_creds <fetched-file> <map: "section<TAB>name" lines> [names to drop...]
+merge_creds() {
+  local file="$1" map="$2"; shift 2
+  local tmp; tmp=$(umask 077; mktemp "$AWS_CREDS.XXXXXX") || return 1
+  mkdir -p "$(dirname "$AWS_CREDS")"; touch "$AWS_CREDS"
+  awk -v drop="$(printf '%s\n' "$@" | paste -sd'\t')" '
+    BEGIN { n = split(drop, d, "\t"); for (i = 1; i <= n; i++) if (d[i] != "") kill[d[i]] = 1 }
+    FILENAME == ARGV[1] { split($0, m, "\t"); rename[m[1]] = m[2]; kill[m[2]] = 1; next }
+    FILENAME == ARGV[2] {
+      if (/^\[/) { s = $0; gsub(/[][ \t]/, "", s); keep = (s in rename); if (keep) out = out "\n[" rename[s] "]\n"; next }
+      if (keep && $0 !~ /^[ \t]*$/) out = out $0 "\n"
+      next
+    }
+    /^\[/ { s = $0; gsub(/[][ \t]/, "", s); skip = (s in kill) }
+    !skip { print }
+    END { printf "%s", out }
+  ' <(printf '%s\n' "$map") "$file" "$AWS_CREDS" | cat -s >"$tmp" && mv -f "$tmp" "$AWS_CREDS"
+}
+
+# Replaces the profiles: and idps: blocks of okta.yaml, keeping every other setting.
+write_yaml_blocks() {
+  local profiles="$1" idps="$2" tmp
+  mkdir -p "$(dirname "$OKTA_YAML")"
+  [[ -f "$OKTA_YAML" ]] || printf 'awscli:\n' >"$OKTA_YAML"
+  tmp=$(mktemp)
+  awk -v pf="$profiles" -v idf="$idps" '
+    function indent(s) { match(s, /^ */); return RLENGTH }
+    function emit(file, ind,   line, pad) {
+      pad = sprintf("%" ind "s", "")
+      while ((getline line < file) > 0) print pad line
+      close(file)
+    }
+    skipping { if ($0 ~ /^ *$/ || indent($0) > sind) next; skipping = 0 }
+    /^ *profiles: *$/ { print; emit(pf, indent($0) + 2); skipping = 1; sind = indent($0); donep = 1; next }
+    /^ *idps: *$/     { print; emit(idf, indent($0) + 2); skipping = 1; sind = indent($0); donei = 1; next }
+    { print }
+    END {
+      if (!donep) { print "  profiles:"; emit(pf, 4) }
+      if (!donei) { print "  idps:"; emit(idf, 4) }
+    }' "$OKTA_YAML" >"$tmp" && mv "$tmp" "$OKTA_YAML"
+}
+
+cmd_sync() {
+  local yes=0 file rows tsv name acct role alias env status old picked n_new=0
+  [[ "${1:-}" == "--yes" || "${1:-}" == "-y" ]] && yes=1
+  write_default_naming
+  file=$(fetch_all) || die "Okta sign-in failed."
+  _OKCLI_TMP_FETCH=$file; trap 'rm -f "${_OKCLI_TMP_FETCH:-}"' EXIT
+
+  # section, role arn → candidate rows: name acct alias role arn section old-name
+  local -A old_by_arn=()
+  while IFS=$'\t' read -r name _ _ _ _ role; do old_by_arn[$role]=$name; done < <(profiles_tsv)
+  tsv=""
+  while IFS=$'\t' read -r sect arn; do
+    [[ -n "$arn" ]] || { warn "Couldn't identify $sect; skipping it."; continue; }
+    acct=${arn#arn:aws:iam::}; acct=${acct%%:*}; role=${arn##*/}
+    alias=${sect%-"$IDP_NAME"-"$role"}
+    [[ "$alias" == "$sect" ]] && alias=$acct
+    name=$(conventional_name "$alias" "$role")
+    tsv+="$name"$'\t'"$acct"$'\t'"$alias"$'\t'"$role"$'\t'"$arn"$'\t'"$sect"$'\t'"${old_by_arn[$arn]:-}"$'\n'
+  done < <(identify_sections "$file")
+  tsv=$(printf '%s' "$tsv" | sort -t$'\t' -k3,3 -k1,1)
+  [[ -n "$tsv" ]] || die "No roles found."
+
+  local dups; dups=$(cut -f1 <<<"$tsv" | sort | uniq -d)
+  [[ -z "$dups" ]] || warn "These names come out the same, edit $NAMING_FILE: $(echo $dups)"
+
+  # Checklist (all ticked), unless --yes or no terminal.
+  local S=$'\x1f' table
+  table=$({
+    printf "  PROFILE${S}ACCOUNT${S}ROLE${S}ENV${S}\n"
+    while IFS=$'\t' read -r name acct alias role _ _ old; do
+      env=$(env_badge "$name $alias")
+      if [[ -z "$old" ]]; then status="${C_CYAN}new${C_RESET}"
+      elif [[ "$old" == "$name" ]]; then status="${C_DIM}unchanged${C_RESET}"
+      else status="${C_DIM}was $old${C_RESET}"; fi
+      printf "  %s$S%s$S%s$S%s$S%s\n" "$name" "$alias" "$role" "$env" "$status"
+    done <<<"$tsv"
+  })
+  if (( yes )) || [[ ! -t 0 || ! -t 1 ]] || ! command -v fzf >/dev/null; then
+    print_table <<<"$table" >&2
+    picked=$(cut -f1 <<<"$tsv")
+  else
+    picked=$(printf '%s\n' "$table" | ui_fzf "okcli sync · $(wc -l <<<"$tsv") roles found" --sortable --multi --header-lines=1 \
+      --prompt='filter> ' --header='tab: tick/untick · ctrl-a: all/none · enter: save the ticked ones · esc: cancel' \
+      --bind='load:select-all,ctrl-a:toggle-all' | sed 's/\x1b\[[0-9;]*m//g' | awk '{ print $1 }') ||
+      { info "Cancelled; nothing changed."; return 0; }
+    [[ -n "$picked" ]] || { info "Nothing ticked; nothing changed."; return 0; }
+  fi
+
+  # Build the new okta.yaml blocks + credentials map.
+  local pf idf map="" sel drop=() olds
+  pf=$(mktemp); idf=$(mktemp)
+  local -A seen_idp=()
+  while IFS=$'\t' read -r name acct alias role arn sect old; do
+    grep -qxF "$name" <<<"$picked" || continue
+    printf '%s:\n  aws-iam-idp: "arn:aws:iam::%s:saml-provider/%s"\n  aws-iam-role: "%s"\n' \
+      "$name" "$acct" "$IDP_NAME" "$arn" >>"$pf"
+    if [[ -z "${seen_idp[$acct]:-}" ]]; then
+      printf '"arn:aws:iam::%s:saml-provider/%s": "%s"\n' "$acct" "$IDP_NAME" "$alias" >>"$idf"
+      seen_idp[$acct]=1
+    fi
+    map+="$sect"$'\t'"$name"$'\n'
+    [[ -z "$old" ]] && n_new=$((n_new + 1))
+  done <<<"$tsv"
+  # Every profile okcli managed before goes; the ticked ones come back under their new names.
+  mapfile -t drop < <(profile_names)
+
+  backup_yaml
+  write_yaml_blocks "$pf" "$idf"; rm -f "$pf" "$idf"
+  merge_creds "$file" "${map%$'\n'}" "${drop[@]}"
+
+  # Carry the default (and record renames for kx and repo pins).
+  local d new_d; d=$(get_default)
+  : >"$STATE_DIR/renamed"
+  while IFS=$'\t' read -r name _ _ _ _ _ old; do
+    [[ -n "$old" && "$old" != "$name" ]] && grep -qxF "$name" <<<"$picked" && printf '%s\t%s\n' "$old" "$name" >>"$STATE_DIR/renamed"
+  done <<<"$tsv"
+  if [[ -n "$d" ]]; then
+    new_d=$(awk -F'\t' -v d="$d" '$1 == d { print $2 }' "$STATE_DIR/renamed")
+    if [[ -n "$new_d" ]]; then printf '%s\n' "$new_d" >"$DEFAULT_FILE"; info "  default: $d → $new_d"
+    elif ! grep -qxF "$d" <<<"$picked"; then rm -f "$DEFAULT_FILE"; warn "Your default '$d' is gone; set one with 'okcli default'."; fi
+  fi
+  if [[ -n "${AWS_PROFILE:-}" ]]; then
+    new_d=$(awk -F'\t' -v d="$AWS_PROFILE" '$1 == d { print $2 }' "$STATE_DIR/renamed")
+    [[ -n "$new_d" ]] && emit_eval "export AWS_PROFILE=$(printf %q "$new_d")"
+  fi
+
+  ok "Saved $(grep -c . <<<"$picked") profiles ($n_new new), all signed in. Backup: $OKTA_YAML.bak"
+  [[ -s "$STATE_DIR/renamed" ]] && info "${C_DIM}  Renamed profiles: run 'kx tidy' to relink clusters; re-pin repos with 'okcli pin'.${C_RESET}"
+  [[ -n "$(get_default)" ]] || info "${C_DIM}  Pick what new terminals start on: okcli default <profile>${C_RESET}"
+}
+
+# Refresh many profiles with one Okta call; anything not covered falls back to one-by-one.
+bulk_refresh() {
+  local names=("$@") file map="" sect arn name missing=()
+  local -A want=()
+  for name in "${names[@]}"; do
+    local row; row=$(profile_row "$name") || { warn "Skipping unknown profile '$name'."; continue; }
+    want[$(cut -f6 <<<"$row")]=$name
+  done
+  file=$(fetch_all) || die "Okta sign-in failed."
+  while IFS=$'\t' read -r sect arn; do
+    [[ -n "$arn" && -n "${want[$arn]:-}" ]] || continue
+    map+="$sect"$'\t'"${want[$arn]}"$'\n'; unset "want[$arn]"
+  done < <(identify_sections "$file")
+  [[ -n "$map" ]] && merge_creds "$file" "${map%$'\n'}"
+  rm -f "$file"
+  for name in "${names[@]}"; do
+    if grep -q $'\t'"$name"'$' <<<"$map"; then ok "$name  $(status_text "$name")"; else missing+=("$name"); fi
+  done
+  (( ${#missing[@]} )) && { warn "Not in the bulk sign-in, trying one by one: ${missing[*]}"; refresh_profiles "${missing[@]}"; }
+  return 0
+}
+
+cmd_whoami() {
+  local name="${1:-${AWS_PROFILE:-}}"
+  [[ -n "$name" ]] || die "No active profile. Pick one with 'okcli'."
+  command -v aws >/dev/null || die "The aws CLI is not installed."
+  info "${C_DIM}profile: $name${C_RESET}"
+  AWS_PROFILE="$name" aws sts get-caller-identity --output table
+}
+
+cmd_exec() {
+  [[ $# -ge 1 ]] || die "Usage: okcli exec <profile> -- <command...>"
+  local name="$1"; shift
+  [[ "${1:-}" == "--" ]] && shift
+  [[ $# -ge 1 ]] || die "Usage: okcli exec <profile> -- <command...>"
+  require_profile "$name"
+  is_fresh "$name" || refresh_profiles "$name" || die "Could not refresh '$name'."
+  unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+  AWS_PROFILE="$name" exec "$@"
+}
+
+choose_profile_or_arg() {
+  if [[ $# -ge 1 && -n "$1" ]]; then require_profile "$1"; echo "$1"; return; fi
+  [[ -t 0 ]] && command -v fzf >/dev/null || die "Give a profile name."
+  local picked
+  picked=$(pick_profile "pick a profile · esc: cancel") || exit 0
+  echo "${picked#*$'\t'}"
+}
+
+cmd_pin() {
+  local name dir envrc
+  name=$(choose_profile_or_arg "${1:-}")
+  [[ -n "$name" ]] || { info "Cancelled. Nothing pinned."; return 0; }
+  dir=$(project_root); envrc="$dir/.envrc"
+  # A pin in ~ would apply to every folder under it: that's what the default is for.
+  [[ "$(readlink -f "$dir")" == "$(readlink -f "$HOME")" ]] &&
+    die "That's your home folder, so the pin would apply everywhere. Use: okcli default $name"
+  if [[ -f "$envrc" ]]; then
+    sed -i '/^export AWS_PROFILE=/d' "$envrc"
+  fi
+  printf 'export AWS_PROFILE=%s  # okcli\n' "$name" >>"$envrc"
+  ok "Pinned ${C_BOLD}$name${C_RESET} to $dir"
+  if command -v direnv >/dev/null; then
+    direnv allow "$dir"
+    info "  It loads whenever you cd into this folder."
+  else
+    warn "direnv is not installed, so the pin won't load automatically. See 'okcli help setup'."
+  fi
+  if git -C "$dir" rev-parse >/dev/null 2>&1 && ! git -C "$dir" check-ignore -q .envrc; then
+    info "${C_DIM}  Tip: .envrc is not git-ignored. Commit it to share the pin, or add it to .gitignore.${C_RESET}"
+  fi
+}
+
+cmd_unpin() {
+  local dir envrc
+  dir=$(project_root); envrc="$dir/.envrc"
+  [[ -f "$envrc" ]] && grep -q '^export AWS_PROFILE=' "$envrc" || { info "No pin in $dir."; return 0; }
+  sed -i '/^export AWS_PROFILE=/d' "$envrc"
+  if [[ ! -s "$envrc" ]]; then rm -f "$envrc"
+  elif command -v direnv >/dev/null; then direnv allow "$dir"; fi
+  ok "Removed the pin from $dir"
+}
+
+backup_yaml() { [[ -f "$OKTA_YAML" ]] && cp -p "$OKTA_YAML" "$OKTA_YAML.bak"; }
+
+valid_name() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; }
+
+cmd_add() {
+  local name="${1:-}" acct="${2:-}" role="${3:-}" picked label
+  if [[ -z "$name" ]]; then read -r -p "Short name for the profile (e.g. dev-ro): " name </dev/tty; fi
+  valid_name "$name" || die "Names may use letters, numbers, '.', '_' and '-'."
+  profile_row "$name" >/dev/null && die "A profile named '$name' already exists."
+
+  if [[ -z "$acct" ]]; then
+    if command -v fzf >/dev/null && [[ -n "$(accounts_tsv)" ]]; then
+      picked=$({ printf 'ACCOUNT\x1fID\n'; accounts_tsv | awk -F'\t' '{ printf "%s\x1f%s\n", $2, $1 }'; } |
+        ui_fzf 'okcli add · account' --sortable --header-lines=1 --prompt='account> ' --header='pick the AWS account (type to filter)') || exit 0
+      acct=$(awk '{ print $NF }' <<<"$picked")
+    else
+      read -r -p "AWS account ID or label: " acct </dev/tty
+    fi
+  fi
+  # Accept a label from the idps: section in place of the 12-digit ID.
+  if ! [[ "$acct" =~ ^[0-9]{12}$ ]]; then
+    label="$acct"
+    acct=$(accounts_tsv | awk -F'\t' -v l="$label" '$2 == l { print $1; exit }')
+    [[ -n "$acct" ]] || die "Unknown account '$label'. Use the 12-digit account ID."
+  fi
+
+  if [[ -z "$role" ]]; then
+    read -r -p "IAM role name (e.g. ReadOnlyAccess, PowerUserAccess): " role </dev/tty
+  fi
+  role=${role##*role/}
+  [[ -n "$role" ]] || die "A role name is required."
+
+  local idp="arn:aws:iam::$acct:saml-provider/Okta-IdP"
+  local role_arn="arn:aws:iam::$acct:role/$role"
+
+  mkdir -p "$(dirname "$OKTA_YAML")"
+  [[ -f "$OKTA_YAML" ]] || printf 'awscli:\n' >"$OKTA_YAML"
+  backup_yaml
+  local tmp; tmp=$(mktemp)
+  awk -v name="$name" -v idp="$idp" -v role="$role_arn" '
+    function block(ind,   pad, pad2) {
+      pad = sprintf("%" ind "s", ""); pad2 = sprintf("%" ind + 2 "s", "")
+      printf "%s%s:\n%saws-iam-idp: \"%s\"\n%saws-iam-role: \"%s\"\n", pad, name, pad2, idp, pad2, role
+    }
+    { print }
+    !done && /^ *profiles: *$/ {
+      match($0, /^ */); block(RLENGTH + 2); done = 1
+    }
+    END {
+      if (!done) {
+        # No profiles: section yet; add one at the end of the file.
+        print "  profiles:"; block(4)
+      }
+    }
+  ' "$OKTA_YAML" >"$tmp" && mv "$tmp" "$OKTA_YAML"
+
+  ok "Added ${C_BOLD}$name${C_RESET}  ($acct / $role)"
+  if confirm "Fetch credentials for it now?"; then refresh_profiles "$name"; fi
+}
+
+cmd_remove() {
+  [[ $# -ge 1 ]] || die "Usage: okcli remove <profile>"
+  local name="$1"
+  require_profile "$name"
+  confirm "Remove profile '$name' from okta.yaml?" n || { info "Not removed."; return 0; }
+  backup_yaml
+  local tmp; tmp=$(mktemp)
+  awk -v name="$name" '
+    function indent(s) { match(s, /^ */); return RLENGTH }
+    skipping {
+      if ($0 ~ /^ *$/ || indent($0) > sind) next
+      skipping = 0
+    }
+    {
+      key = $0; sub(/^ +/, "", key); sub(/:[ \t]*$/, "", key); gsub(/"/, "", key)
+      if (in_profiles && key == name && indent($0) > pind) { skipping = 1; sind = indent($0); next }
+      if ($0 ~ /^ *profiles: *$/) { in_profiles = 1; pind = indent($0) }
+      else if (in_profiles && $0 !~ /^ *$/ && indent($0) <= pind) in_profiles = 0
+      print
+    }
+  ' "$OKTA_YAML" >"$tmp" && mv "$tmp" "$OKTA_YAML"
+  [[ "${AWS_PROFILE:-}" == "$name" ]] && emit_eval "unset AWS_PROFILE"
+  [[ "$(get_default)" == "$name" ]] && rm -f "$DEFAULT_FILE"
+  ok "Removed $name (backup: $OKTA_YAML.bak)"
+}
+
+cmd_rename() {
+  [[ $# -eq 2 ]] || die "Usage: okcli rename <old> <new>"
+  local old="$1" new="$2"
+  require_profile "$old"
+  valid_name "$new" || die "Names may use letters, numbers, '.', '_' and '-'."
+  profile_row "$new" >/dev/null && die "A profile named '$new' already exists."
+  backup_yaml
+  local tmp; tmp=$(mktemp)
+  awk -v old="$old" -v new="$new" '
+    function indent(s) { match(s, /^ */); return RLENGTH }
+    {
+      if ($0 ~ /^ *profiles: *$/) { in_p = 1; pind = indent($0); print; next }
+      if (in_p && $0 !~ /^ *$/ && indent($0) <= pind) in_p = 0
+      if (in_p) {
+        key = $0; sub(/^ +/, "", key); sub(/:[ \t]*$/, "", key); gsub(/"/, "", key)
+        if (key == old) { $0 = sprintf("%" indent($0) "s%s:", "", new) }
+      }
+      print
+    }
+  ' "$OKTA_YAML" >"$tmp" && mv "$tmp" "$OKTA_YAML"
+  # Carry the existing credentials across so no refresh is needed.
+  if [[ -f "$AWS_CREDS" ]] && grep -qxF "[$old]" "$AWS_CREDS"; then
+    sed -i "s/^\[$old\]\$/[$new]/" "$AWS_CREDS"
+  fi
+  [[ "${AWS_PROFILE:-}" == "$old" ]] && emit_eval "export AWS_PROFILE=$(printf %q "$new")"
+  [[ "$(get_default)" == "$old" ]] && printf '%s\n' "$new" >"$DEFAULT_FILE"
+  ok "Renamed $old → $new"
+  info "${C_DIM}  Repos pinned to '$old' need 'okcli pin $new'.${C_RESET}"
+}
+
+cmd_edit() {
+  "${EDITOR:-${VISUAL:-nano}}" "$OKTA_YAML"
+}
+
+cmd_doctor() {
+  local bad=0 v
+  check() { if eval "$2" >/dev/null 2>&1; then ok "$1"; else warn "$1 — $3"; bad=1; fi; }
+  check "okta-aws-cli installed" "command -v okta-aws-cli" "install it from github.com/okta/okta-aws-cli"
+  check "aws CLI installed" "command -v aws" "needed for 'okcli whoami'"
+  check "fzf installed" "command -v fzf" "needed for the interactive picker (apt install fzf)"
+  check "direnv installed" "command -v direnv" "needed for 'okcli pin' (apt install direnv)"
+  check "shell wrapper loaded" "[[ -n \"\${OKCLI_SHELL:-}\" ]]" "tk install bash"
+  for v in OKTA_AWSCLI_ORG_DOMAIN OKTA_AWSCLI_OIDC_CLIENT_ID; do
+    check "$v set" "[[ -n \"\${$v:-}\" ]]" "export it in your shell rc (ask the team for the value)"
+  done
+  check "okta.yaml found ($OKTA_YAML)" "[[ -r \"$OKTA_YAML\" ]]" "create it or run 'okcli add'"
+  check "profiles defined" "[[ -n \"\$(profiles_tsv)\" ]]" "run 'okcli add'"
+  return $bad
+}
+
+# ------------------------------------------------------------------ help ---
+
+cmd_help() {
+  if [[ "${1:-}" == setup ]]; then
+    ui_help "okcli help setup" "first-time setup" <<'EOF'
+## 1. Install
+./install.sh	from the toolkit folder; tick "commands"	puts okcli on PATH, hooks your shell
+
+## 2. Okta settings (from your org's layer, or export them yourself)
+OKTA_AWSCLI_ORG_DOMAIN	<your-org>.okta.com
+OKTA_AWSCLI_OIDC_CLIENT_ID	the Okta app's client id	ask the team
+OKTA_AWSCLI_SESSION_DURATION	14400	4h; the max depends on the role
+
+## 3. Get your profiles
+okcli sync	sign in once, tick the account+roles you want
+okcli add	or add one by hand: name, account, role
+okcli edit	or edit ~/.okta/okta.yaml directly
+
+## 4. Check
+okcli doctor	everything green?
+
+Without starship, show the profile in bash with: PS1='$(_okcli_ps1)'"$PS1"
+EOF
+    return
+  fi
+  ui_help okcli "Okta AWS profiles · v$OKCLI_VERSION" <<'EOF'
+## Everyday
+okcli	picker	enter: switch · ctrl-r: refresh + switch · ctrl-d: default
+okcli <profile>	switch this terminal
+okcli ls	every profile, its account, role and session
+okcli status	what this terminal is using
+okcli current	the profile in use, name only
+okcli refresh [profile...]	log in once, refresh all (or just these)	--expired · --current
+okcli whoami [profile]	ask AWS who you are
+okcli off	no profile in this terminal
+
+## Default
+okcli default [profile]	show / set what new terminals start on	ctrl-d in the picker too
+okcli default off	new terminals start with no profile
+
+## Per folder
+okcli pin [profile]	this folder always uses a profile	.envrc, via direnv
+okcli unpin	remove the folder's pin
+okcli exec <profile> -- <cmd>	one command under a profile	okcli exec prod-ro -- aws s3 ls
+
+## Manage
+okcli sync	sign in once, tick the account+roles to keep	names: ~/.config/okcli/naming.conf
+okcli add [name account role]	add a profile by hand
+okcli rename <old> <new>	rename a profile, keeping its login
+okcli remove <profile>	delete a profile
+okcli edit	open ~/.okta/okta.yaml in $EDITOR
+okcli env <profile>	print 'export AWS_PROFILE=...' for scripts
+okcli doctor	check the setup
+okcli help [setup]	this page, or the first-time setup guide
+
+## How it works
+Profiles live in ~/.okta/okta.yaml; logins go to ~/.aws/credentials under the
+same short name. Nothing is written to [default].
+Strongest first: a folder pin, then this terminal's switch, then the default.
+Switching to an expired profile offers to refresh it first.
+Profiles count as prod unless the name or account contains dev / test / stg / qa / poc.
+EOF
+}
+
+# --------------------------------------------------------------- dispatch ---
+
+main() {
+  local cmd="${1:-}"
+  [[ $# -gt 0 ]] && shift
+  case "$cmd" in
+    "")              cmd_pick ;;
+    ls|list)         cmd_ls ;;
+    st|status)       cmd_status ;;
+    cur|current)     cmd_current ;;
+    off)             cmd_off ;;
+    default)         cmd_default "$@" ;;
+    refresh)         cmd_refresh "$@" ;;
+    whoami)          cmd_whoami "$@" ;;
+    exec)            cmd_exec "$@" ;;
+    pin)             cmd_pin "$@" ;;
+    unpin)           cmd_unpin ;;
+    sync)            cmd_sync "$@" ;;
+    add)             cmd_add "$@" ;;
+    rename)          cmd_rename "$@" ;;
+    remove)          cmd_remove "$@" ;;
+    edit)            cmd_edit ;;
+    env)             cmd_env "$@" ;;
+    doctor)          cmd_doctor ;;
+    help|-h|--help)  cmd_help "$@" ;;
+    __names)         profile_names ;;
+    __profiles)      profiles_tsv ;;
+    __accounts)      accounts_tsv ;;
+    __prod_names)
+      local n l
+      while IFS=$'\t' read -r n _ l _ _ _; do is_prod "$n" "$l" && printf '%s\n' "$n"; done < <(profiles_tsv)
+      ;;
+    __status)        status_text "${1:?}" ;;
+    __expiries)      # "profile epoch" for every profile with an expiry stamp
+      local n e
+      while read -r n; do
+        e=$(expiry_of "$n"); [[ -n "$e" ]] || continue
+        e=$(date -d "$e" +%s 2>/dev/null) && printf '%s %s\n' "$n" "$e"
+      done < <(awk '/^\[/ { gsub(/[][ ]/, ""); print }' "$AWS_CREDS" 2>/dev/null)
+      ;;
+    __open)          open_url "${1:?}" ;;
+    __ps1)
+      local p="${AWS_PROFILE:-}"
+      [[ -n "$p" ]] || exit 0
+      if is_fresh "$p"; then printf '%s' "$p"; else printf '%s!' "$p"; fi
+      ;;
+    -*)              ui_unknown okcli "$cmd" ;;
+    *)
+      if profile_row "$cmd" >/dev/null; then do_switch "$cmd"
+      else ui_unknown okcli "$cmd" profile; fi
+      ;;
+  esac
+}
+
+main "$@"

@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# twin - pick and switch Twingate exit nodes (replaces the old twinconnect function).
+#
+# Short codes come from the node names ("GB - Manchester EN" -> gb), so new
+# exit nodes show up without editing anything.
+
+set -uo pipefail
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+ROOT="$(cd "$(dirname "$SELF")/../.." && pwd)"
+# shellcheck source=../../lib/ui.sh
+. "$ROOT/lib/ui.sh"
+
+TWIN_VERSION="1.0.0"
+S=$'\x1f'
+
+command -v twingate >/dev/null || die "twingate is not installed."
+
+# One row per exit node: code<TAB>name<TAB>time-left<TAB>active(0/1)
+nodes() {
+  local out
+  out=$(twingate exit-node list -d 2>&1) || { printf '%s\n' "$out" >&2; return 1; }
+  awk -F'\t' '
+    NR == 1 { head = $0; next }
+    /^EXIT NETWORK NAME/ { table = 1; next }
+    !table || /^[ \t]*$/ { next }
+    {
+      name = $1; left = $2
+      gsub(/^[ \t]+|[ \t]+$/, "", name); gsub(/^[ \t]+|[ \t]+$/, "", left)
+      code = name; sub(/[ \t]*-.*$/, "", code)
+      active = (left != "" && left != "--") || (head !~ /n.t being routed|not routed|isn.t/ && index(head, name) > 0)
+      printf "%s\t%s\t%s\t%d\n", tolower(code), name, left, active
+    }' <<<"$out"
+}
+
+active_node() { nodes | awk -F'\t' '$4 == 1 { print $2; exit }'; }
+
+connection() { twingate status -d 2>/dev/null | head -n1; }
+
+# The node table (header + rows); boxed by `twin ls`, bare inside the picker.
+node_rows() {
+  local rows code name left active first
+  rows=$(nodes) || return 1
+  [[ -n "$rows" ]] || { warn "No exit nodes available."; return 1; }
+  printf '%s\n' "  ${C_BOLD}CODE${C_RESET}${S}${C_BOLD}EXIT NODE${C_RESET}${S}${C_BOLD}TIME LEFT${C_RESET}"
+  while IFS=$'\t' read -r code name left active; do
+    if [[ "$active" == 1 ]]; then first="$(ui_mark_here) ${C_BOLD}$code${C_RESET}"; name="${C_BOLD}$name${C_RESET}"
+    else first="  $code"; fi
+    printf "%s$S%s$S%s\n" "$first" "$name" "${left/--/${C_DIM}–${C_RESET}}"
+  done <<<"$rows"
+}
+
+cmd_ls() {
+  [[ -t 1 ]] || ui_no_color
+  local t; t=$(node_rows) || return 1
+  printf '%s\n' "$t" | ui_table "twin · exit nodes" "$(ui_mark_here) in use"
+}
+
+cmd_status() {
+  [[ -t 1 ]] || ui_no_color
+  local c a conn node
+  c=$(connection); a=$(active_node)
+  if [[ "$c" == online ]]; then conn="${C_GREEN}connected${C_RESET}"
+  else conn="${C_YELLOW}${c:-unknown}${C_RESET}  $(ui_hint 'open the Twingate app')"; fi
+  if [[ -n "$a" ]]; then node="${C_BOLD}$a${C_RESET}  ${C_DIM}all traffic goes through it${C_RESET}"
+  else node="direct  ${C_DIM}only private resources go through Twingate${C_RESET}"; fi
+  printf 'twingate\t%s\nexit node\t%s\napplies to\tthe whole machine\n' "$conn" "$node" | ui_fields twin
+}
+
+resolve() {   # code or part of a name -> full node name
+  local q="${1,,}"
+  nodes | awk -F'\t' -v q="$q" '
+    $1 == q { print $2; exact = 1; exit }
+    index(tolower($2), q) { hit[++n] = $2 }
+    END { if (!exact && n == 1) print hit[1]; if (!exact && n > 1) exit 2 }'
+}
+
+go() {
+  local name="$1" cur
+  cur=$(active_node)
+  if [[ "$cur" == "$name" ]]; then ok "Already routing through $name."; return 0; fi
+  if [[ -n "$cur" ]]; then
+    info "${C_DIM}Switching exit node: $cur → $name${C_RESET}"
+    twingate exit-node switch "$name" >/dev/null || twingate exit-node start "$name" >/dev/null || die "Couldn't switch to $name."
+  else
+    info "${C_DIM}Routing all traffic through $name...${C_RESET}"
+    twingate exit-node start "$name" >/dev/null || die "Couldn't start $name."
+  fi
+  ok "Exit node: ${C_BOLD}$name${C_RESET}"
+}
+
+cmd_off() {
+  [[ -n "$(active_node)" ]] || { ok "No exit node active."; return 0; }
+  twingate exit-node stop >/dev/null || die "Couldn't stop the exit node."
+  ok "Exit node off. Normal internet routing."
+}
+
+cmd_pick() {
+  if [[ ! -t 1 || ! -t 0 ]] || ! command -v fzf >/dev/null; then cmd_ls; return; fi
+  local table out key sel name
+  table=$(node_rows | print_table 3) || return 1
+  out=$(printf '%s\n' "$table" | ui_fzf 'twin · exit nodes' --header-lines=1 --prompt='exit node> ' \
+    --header='enter: route through it · ctrl-x: stop · esc: cancel' --expect=ctrl-x) || return 0
+  key=$(sed -n 1p <<<"$out")
+  if [[ "$key" == ctrl-x ]]; then cmd_off; return; fi
+  sel=$(strip_ansi "$(sed -n 2p <<<"$out")" | awk '{ print ($1 == "●") ? $2 : $1 }')
+  [[ -n "$sel" ]] || return 0
+  name=$(resolve "$sel") && [[ -n "$name" ]] && go "$name"
+}
+
+cmd_help() {
+  ui_help twin "Twingate exit nodes · v$TWIN_VERSION" <<'EOF'
+twin	picker	enter: route through it · ctrl-x: stop
+twin <code>	route all traffic through a node	twin gb, twin us, twin paris
+twin ls	every exit node
+twin status	connection and the exit node in use
+twin current	the exit node in use, name only
+twin off	stop the exit node
+twin help	this page
+
+Codes come from the node names, so new nodes need no setup.
+The exit node applies to the whole machine, not just this terminal.
+EOF
+}
+
+main() {
+  local cmd="${1:-}"
+  [[ $# -gt 0 ]] && shift
+  case "$cmd" in
+    "")                 cmd_pick ;;
+    ls|list)            cmd_ls ;;
+    st|status)          cmd_status ;;
+    cur|current)        active_node ;;
+    off)                cmd_off ;;
+    help|-h|--help)     cmd_help ;;
+    __current)          active_node ;;
+    __codes)            nodes | cut -f1 ;;
+    -*)                 ui_unknown twin "$cmd" ;;
+    *)
+      local name rc
+      name=$(resolve "$cmd"); rc=$?
+      [[ $rc -eq 2 ]] && die "'$cmd' matches more than one exit node · see: twin ls"
+      [[ -n "$name" ]] || ui_unknown twin "$cmd" "exit node"
+      go "$name"
+      ;;
+  esac
+}
+
+main "$@"

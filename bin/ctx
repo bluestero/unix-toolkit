@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+# ctx - where am I? One table: AWS profile, Kubernetes cluster and Twingate for
+# this terminal, what new terminals start on, and any AWS pin for this folder.
+#
+#   ctx          the table
+#   ctx help     this, plus how to change things
+#   ctx plain    labelled lines, no box or icons (for Claude's SessionStart hook)
+
+set -uo pipefail
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
+# shellcheck source=../lib/ui.sh
+. "$ROOT/lib/ui.sh"
+[[ -t 1 ]] || ui_no_color
+S=$'\x1f'
+
+PLAIN=0
+case "${1:-}" in
+  "") ;;
+  plain) PLAIN=1; ui_no_color ;;
+  help|-h|--help)
+    ui_help ctx "where am I?" <<'EOF'
+## Commands
+ctx	AWS, Kubernetes and Twingate for this terminal, and what new terminals start on
+ctx plain	labelled lines, no box or icons (for Claude)
+ctx help	this page
+
+## Change things
+okcli	pick an AWS profile for this terminal
+okcli default <profile>	what new terminals start on
+okcli pin <profile>	pin a profile to this folder	.envrc
+kx	pick a Kubernetes context for this terminal
+kx ns <namespace>	namespace for this terminal
+kx default <context>	what new terminals start on
+twin / twin off	Twingate exit node	whole machine
+EOF
+    exit 0 ;;
+  *) ui_unknown ctx "$1" ;;
+esac
+
+I_AWS=$'\U000F0163' I_K8S=$'\U000F10FE' I_NET=$'\U000F0582' I_PIN=$'\U000F0403'
+
+has() { command -v "$1" >/dev/null; }
+dim() { printf '%s%s%s' "$C_DIM" "$1" "$C_RESET"; }
+none() { dim "${1:-–}"; }
+# name + env tag, one space apart: "shop-prod prod" (prod red, stage yellow, dev green)
+named() { printf '%s %s' "$C_BOLD$1$C_RESET" "$(env_badge "$1 ${2:-}")"; }
+# "new terminals" cell: "same" when it matches this terminal
+default_cell() {
+  if [[ -z "$1" ]]; then none
+  elif [[ "$1" == "$2" ]]; then dim same
+  else named "$1"; fi
+}
+# seconds -> green (1h+), yellow (under 1h), red (expired)
+time_left() {
+  local s=$1 h m
+  if (( s <= 0 )); then printf '%s' "$C_RED${C_BOLD}expired$C_RESET"; return; fi
+  h=$(( s / 3600 )) m=$(( s % 3600 / 60 ))
+  if (( s >= 3600 )); then printf '%s%dh%02dm left%s' "$C_GREEN" "$h" "$m" "$C_RESET"
+  else printf '%s%dm left%s' "$C_YELLOW" "$m" "$C_RESET"; fi
+}
+# AWS session time left for a profile (okcli's cached expiry), or okcli's own words
+session() {
+  local exp
+  exp=$(awk -v p="$1" '$1 == p { print $2 }' <<<"$expiries")
+  if [[ -n "$exp" ]]; then
+    time_left $(( exp - $(date +%s) ))
+  else okcli __status "$1" 2>/dev/null; fi
+}
+row() { local IFS=$S; printf '%s\n' "$*"; }
+
+# ---------------------------------------------------------------- gather ---
+aws_p="${AWS_PROFILE:-}" aws_acct="" aws_role="" aws_left="" aws_def="" expiries=""
+if has okcli; then
+  expiries=$(okcli __expiries 2>/dev/null)
+  if [[ -n "$aws_p" ]]; then
+    IFS=$'\t' read -r _ _ aws_acct aws_role _ < <(okcli __profiles 2>/dev/null | awk -F'\t' -v p="$aws_p" '$1 == p')
+    aws_left=$(session "$aws_p")
+  fi
+  aws_def=$(okcli default 2>/dev/null)
+fi
+
+k_cur="" k_ns="" k_via="" k_def="" k_local=0
+if has kubectl && has kx; then
+  k_cur=$(kubectl config current-context 2>/dev/null)
+  [[ -n "$k_cur" ]] && IFS=$'\t' read -r _ k_ns k_via < <(kx __current 2>/dev/null)
+  k_def=$(kx default 2>/dev/null)
+  [[ "${KUBECONFIG:-}" == "${KX_SHELL_FILE:-//}"* ]] && k_local=1
+fi
+
+envrc="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.envrc"
+pin=""
+[[ -r "$envrc" ]] && pin=$(sed -n 's/^export AWS_PROFILE=\([^ ]*\).*/\1/p' "$envrc" | tail -n1)
+
+# ------------------------------------------------- prod flag (box label) ---
+prod=()
+[[ -n "$aws_p" ]] && is_prod "$aws_p $aws_acct" && prod+=(AWS)
+[[ -n "$k_cur" ]] && is_prod "$k_cur" && prod+=(Kubernetes)
+flag=""
+if (( ${#prod[@]} )); then
+  where="${prod[0]}"; (( ${#prod[@]} == 2 )) && where="${prod[0]} · ${prod[1]}"
+  flag="$(ui_badge PROD) $C_BOLD$where$C_RESET"
+fi
+
+# ----------------------------------------------------------------- plain ---
+# For Claude: one labelled line each, no box, icons or columns to line up.
+if (( PLAIN )); then
+  tag() { is_prod "$1" && printf ' (PROD)'; }
+  echo "work-toolkit context (from ctx, in $(pwd | sed "s|^$HOME|~|")):"
+  if [[ -n "$aws_p" ]]; then
+    echo "AWS profile: $aws_p$(tag "$aws_p $aws_acct"), ${aws_left:-session unknown}, account ${aws_acct:-not managed by okcli}${aws_role:+, role $aws_role}"
+  elif has okcli; then echo "AWS profile: none"; fi
+  if [[ -n "$pin" ]]; then
+    m="matches"; [[ "$pin" != "$aws_p" ]] && m="does NOT match the profile above"
+    echo "Repo pin: $pin ($m; ${envrc/#$HOME/\~})"
+  else echo "Repo pin: none in this folder"; fi
+  [[ -n "$aws_def" ]] && echo "New terminals start on: AWS $aws_def${k_def:+, Kubernetes $k_def}"
+  if [[ -n "$k_cur" ]]; then
+    echo "Kubernetes: $k_cur$(tag "$k_cur"), namespace ${k_ns:-default}${k_via:+, signs in via AWS $k_via}"
+  elif has kx; then echo "Kubernetes: none"; fi
+  if has twingate; then
+    conn=$(twingate status -d 2>/dev/null | head -n1); node=$(has twin && twin __current 2>/dev/null)
+    echo "Twingate: ${node:-direct}, ${conn:-unknown} (whole machine)"
+  fi
+  exit 0
+fi
+
+# ----------------------------------------------------------------- table ---
+table=$(
+  h() { printf '%s%s%s' "$C_BOLD" "$1" "$C_RESET"; }
+  row "" "$(h 'THIS TERMINAL')" "$(h DEFAULT)" "$(h STATUS)" "$(h DETAILS)"
+
+  if [[ -n "$aws_p" ]]; then
+    row "$I_AWS AWS" "$(named "$aws_p" "$aws_acct")" "$(default_cell "$aws_def" "$aws_p")" "$aws_left" "${aws_acct:-not managed by okcli}"
+  elif has okcli; then
+    row "$I_AWS AWS" "$(none none)" "$(default_cell "$aws_def" "")" "$(none)" "pick one: okcli"
+  fi
+
+  # Kubernetes signs in through an AWS profile, so its status is that session
+  if [[ -n "$k_cur" ]]; then
+    st=$(none); [[ -n "$k_via" ]] && has okcli && st=$(session "$k_via")
+    det="namespace ${k_ns:-default}"
+    row "$I_K8S Kubernetes" "$(named "$k_cur")" "$(default_cell "$k_def" "$k_cur")" "$st" "$det"
+  elif has kx; then
+    row "$I_K8S Kubernetes" "$(none none)" "$(default_cell "$k_def" "")" "$(none)" "pick one: kx"
+  fi
+
+  # Twingate is machine-wide: every terminal shares the same exit node
+  if has twingate; then
+    conn=$(twingate status -d 2>/dev/null | head -n1)
+    node=$(has twin && twin __current 2>/dev/null)
+    if [[ "$conn" == online ]]; then c="${C_GREEN}connected$C_RESET"; else c="$C_YELLOW${conn:-unknown}$C_RESET"; fi
+    if [[ -n "$node" ]]; then n="$C_BOLD$node$C_RESET"; else n=direct; fi
+    det="whole machine"
+    row "$I_NET Twingate" "$n" "$(dim same)" "$c" "$det"
+  fi
+
+  if [[ -n "$pin" ]]; then
+    row "$I_PIN Folder pin" "$(named "$pin")" "$(none)" "AWS here" "${envrc/#$HOME/\~}"
+  fi
+)
+
+if [[ -t 1 ]]; then
+  # one fix for every expired session, in the bottom border
+  foot=""; [[ "$(strip_ansi "$table")" == *expired* ]] && foot="${C_RED}expired${C_RESET} $(ui_hint 'okcli refresh')"
+  print_table 3 <<<"$table" | ui_box ctx "$flag" 1 "$foot"
+else  # piped: plain table, no box, so it greps and diffs cleanly
+  (( ${#prod[@]} )) && printf 'PROD: %s\n' "${prod[*]}"
+  print_table 3 <<<"$table"
+fi

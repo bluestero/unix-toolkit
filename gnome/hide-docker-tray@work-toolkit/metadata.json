@@ -1,0 +1,6 @@
+{
+  "uuid": "hide-docker-tray@work-toolkit",
+  "name": "Hide Docker tray dots",
+  "description": "Hides Docker Desktop's tray item (no icon, empty menu: three dots that do nothing on click).",
+  "shell-version": ["45", "46", "47", "48", "49"]
+}

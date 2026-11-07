@@ -1,0 +1,368 @@
+"$schema" = "https://starship.rs/config-schema.json"
+# Managed in the toolkit's starship/starship.toml (symlinked to ~/.config/starship.toml).
+#
+#  …/shop-api  github main !?   v3.12.3 (env)  󱃾 shop-dev · flux-system  󰅣 shop-dev-ro 3h5m         4s  16:42
+#  ❯
+#
+# Prod is loud: a red PROD badge before the AWS profile (set by the okcli hook)
+# and the kube context turns red with a warning sign on *prod* clusters.
+
+scan_timeout = 50
+command_timeout = 500
+# The blank line between prompts comes from shell/init.sh instead, which skips it
+# before the first prompt (so a new terminal starts at the top).
+add_newline = false
+palette = "custom1"
+
+format = """\
+$directory\
+( [·](244) ${custom.giturl}$git_branch${custom.git_worktree}$git_state)\
+( [·](244) $python)( [·](244) $nodejs)( [·](244) $golang)( [·](244) $rust)( [·](244) $docker_context)\
+( [·](244) $kubernetes)\
+( [·](244) ${env_var.OKCLI_AWS}${env_var.OKCLI_AWS_PROD}${env_var.OKCLI_AWS_EXPIRED}${env_var.OKCLI_AWS_LEFT}${env_var.OKCLI_AWS_LEFT_LOW})\
+$fill\
+($jobs )$cmd_duration\
+$line_break\
+$character"""
+
+[fill]
+symbol = " "
+
+[directory]
+style = "bold sapphire"
+read_only = "󰌾 "
+read_only_style = "red"
+format = "[$read_only]($read_only_style)[$path]($style)"
+truncation_length = 3
+truncate_to_repo = true
+truncation_symbol = "…/"
+home_symbol = "~"
+
+[git_branch]
+style = "bold mauve"
+format = "[$branch]($style)"
+
+[git_state]
+style = "bold peach"
+format = "[ $state( $progress_current/$progress_total)]($style)"
+
+[git_status]
+style = "text"
+format = "([ $conflicted$untracked$staged$modified$renamed$deleted$stashed$ahead_behind]($style))"
+staged     = "[+$count](green)"
+modified   = "[!$count](yellow)"
+renamed    = "[»$count](blue)"
+deleted    = "[-$count](red)"
+untracked  = "[?$count](red)"
+stashed    = "[≡](lavender)"
+conflicted = "[✖$count](red bold)"
+ahead      = "[⇡$count](teal)"
+behind     = "[⇣$count](peach)"
+diverged   = "[⇕⇡$ahead_count⇣$behind_count](mauve)"
+
+[python]
+symbol = " "
+style = "yellow"
+version_format = "v${raw}"
+format = "[$symbol$version( \\($virtualenv\\))]($style)"
+
+[nodejs]
+symbol = " "
+style = "green"
+format = "[$symbol$version]($style)"
+
+[golang]
+symbol = " "
+style = "sky"
+format = "[$symbol$version]($style)"
+
+[rust]
+symbol = " "
+style = "peach"
+format = "[$symbol$version]($style)"
+
+[docker_context]
+symbol = " "
+style = "blue"
+format = "[$symbol$context]($style)"
+
+[package]
+disabled = true
+
+[kubernetes]
+disabled = false
+symbol = "󱃾 "
+style = "teal"
+format = "[$symbol$context]($style)"
+
+# First match wins. EKS ARNs are cut down to the cluster name.
+[[kubernetes.contexts]]
+context_pattern = "arn:aws:eks:[^:]+:[0-9]+:cluster/(?P<var_cluster>.*(prod|prd).*)"
+context_alias = "$var_cluster"
+style = "bold red"
+
+[[kubernetes.contexts]]
+context_pattern = "arn:aws:eks:[^:]+:[0-9]+:cluster/(?P<var_cluster>.+)"
+context_alias = "$var_cluster"
+
+[[kubernetes.contexts]]
+context_pattern = ".*(prod|prd).*"
+style = "bold red"
+
+# AWS profile, colored by the okcli shell hook, which sets exactly one of these.
+[aws]
+disabled = true
+
+[env_var.OKCLI_AWS]
+format = "[󰅣 $env_value](peach)"
+
+[env_var.OKCLI_AWS_PROD]
+format = "[󰅣 $env_value](bold red)"
+
+[env_var.OKCLI_AWS_EXPIRED]
+format = "[󰅣 $env_value](peach)[ expired](bold red)"
+
+# Time the login has left, from the same hook: green, yellow under 30 minutes.
+[env_var.OKCLI_AWS_LEFT]
+format = " [$env_value](green)"
+
+[env_var.OKCLI_AWS_LEFT_LOW]
+format = " [$env_value](yellow)"
+
+[jobs]
+symbol = "✦"
+style = "bold blue"
+format = "[$symbol$number]($style)"
+
+[cmd_duration]
+min_time = 2000
+# Bright and bold: the muted overlay colours vanish on a background image.
+style = "bold text"
+format = "[ $duration]($style) "
+
+[time]
+disabled = true
+
+[character]
+success_symbol = "[❯](bold green)"
+error_symbol = "[❯](bold red)"
+vimcmd_symbol = "[❮](bold yellow)"
+
+[custom.giturl]
+description = "Display symbol for remote Git server"
+command = """
+GIT_REMOTE=$(command git ls-remote --get-url 2> /dev/null)
+if [[ "$GIT_REMOTE" =~ "github" ]]; then
+    GIT_REMOTE_SYMBOL=""
+elif [[ "$GIT_REMOTE" =~ "gitlab" ]]; then
+    GIT_REMOTE_SYMBOL=""
+elif [[ "$GIT_REMOTE" =~ "bitbucket" ]]; then
+    GIT_REMOTE_SYMBOL=""
+elif [[ "$GIT_REMOTE" =~ "git" ]]; then
+    GIT_REMOTE_SYMBOL=""
+else
+    GIT_REMOTE_SYMBOL=""
+fi
+echo "$GIT_REMOTE_SYMBOL "
+"""
+when = "git rev-parse --is-inside-work-tree 2> /dev/null"
+shell = ["bash", "--noprofile", "--norc"]
+style = "white"
+format = "[$output ]($style)"
+require_repo = true
+ignore_timeout = true
+
+
+[custom.git_worktree]
+description = "Show indicator when inside a git worktree"
+command = """
+if git rev-parse --git-dir >/dev/null 2>&1; then
+      common_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+      git_dir=$(git rev-parse --path-format=absolute --git-dir 2>/dev/null)
+      if [ "$common_dir" != "$git_dir" ]; then
+            echo "⛓ "
+      fi
+fi
+"""
+when = "git rev-parse --is-inside-work-tree >/dev/null 2>&1"
+format = "( [$output]($style))"
+style = "bold green"
+require_repo = true
+ignore_timeout = true
+
+# ---------------------------------------------------------------- palettes
+# Switch with: palette = "tokyonight_night" (or gruvbox_dark, solarized_osaka, one_dark)
+
+[palettes.custom1]
+# --- background ---
+crust = "#11111b"
+mantle = "#181825"
+base = "#1e1e2e" # git branch bg
+
+overlay2 = "#9399b2"
+overlay1 = "#7f849c"
+overlay0 = "#6c7086"
+
+surface2 = "#585b70"
+surface1 = "#45475a"
+surface0 = "#313244"
+
+# --- text ---
+text = "#cdd6f4"
+subtext1 = "#bac2de"
+subtext0 = "#a6adc8"
+
+# --- accents (catppuccin_mocha) ---
+rosewater = "#f5e0dc"
+flamingo = "#f2cdcd"
+pink = "#f5c2e7"
+mauve = "#cba6f7"
+red = "#f38ba8"
+maroon = "#eba0ac"
+peach = "#fab387"
+yellow = "#f9e2af"
+green = "#a6e3a1"
+teal = "#94e2d5"
+sky = "#89dceb"
+sapphire = "#74c7ec"
+blue = "#89b4fa"
+lavender = "#b4befe" # git branch fg
+
+[palettes.gruvbox_dark]
+# --- background ---
+crust = "#1d2021"
+mantle = "#282828"
+base = "#fbf1c7" # git branch bg
+
+surface0 = "#3c3836"
+surface1 = "#504945"
+surface2 = "#665c54"
+
+overlay0 = "#7c6f64"
+overlay1 = "#a89984"
+overlay2 = "#bdae93"
+
+# --- text ---
+text = "#ebdbb2"
+subtext0 = "#d5c4a1"
+subtext1 = "#fbf1c7"
+
+# --- accents gruvbox ---
+rosewater = "#fbf1c7"
+flamingo = "#fe8019"
+pink = "#d3869b"
+mauve = "#d3869b"
+red = "#cc241d"
+maroon = "#fb4934"
+peach = "#fe8019"
+yellow = "#d79921"
+green = "#98971a"
+teal = "#8ec07c"
+sky = "#8ec07c"
+sapphire = "#83a598"
+blue = "#458588"
+lavender = "#d3869b" # git branch fg
+
+[palettes.tokyonight_night]
+# --- background ---
+crust = "#16161e"
+mantle = "#16161e"
+base = "#1a1b26" # git branch bg
+
+surface0 = "#292e42"
+surface1 = "#3b4261"
+surface2 = "#414868"
+
+overlay0 = "#565f89"
+overlay1 = "#737aa2"
+overlay2 = "#9aa5ce"
+
+# --- text ---
+text = "#c0caf5"
+subtext0 = "#a9b1d6"
+subtext1 = "#c0caf5"
+
+# --- accents tokyonight ---
+rosewater = "#c0caf5"
+flamingo = "#ff9e64"
+pink = "#f7768e"
+mauve = "#bb9af7"
+red = "#f7768e"
+maroon = "#f7768e"
+peach = "#ff9e64"
+yellow = "#e0af68"
+green = "#9ece6a"
+teal = "#7dcfff"
+sky = "#7dcfff"
+sapphire = "#7aa2f7" # dir fg
+blue = "#7aa2f7"
+lavender = "#bb9af7" # git branch fg
+
+[palettes.solarized_osaka]
+# --- background ---
+crust = "#00141a"
+mantle = "#002029"
+base = "#002b36" # git branch bg
+
+surface0 = "#073642"
+surface1 = "#0f3b47"
+surface2 = "#124652"
+
+overlay0 = "#586e75"
+overlay1 = "#657b83"
+overlay2 = "#839496"
+
+# --- text ---
+text = "#93a1a1"
+subtext0 = "#839496"
+subtext1 = "#93a1a1"
+
+# --- accents ---
+rosewater = "#eee8d5"
+flamingo = "#dc322f"
+pink = "#d33682"
+mauve = "#6c71c4"
+red = "#dc322f"
+maroon = "#cb4b16"
+peach = "#cb4b16"
+yellow = "#b58900"
+green = "#859900"
+teal = "#2aa198"
+sky = "#2aa198"
+sapphire = "#268bd2" # dir fg
+blue = "#268bd2"
+lavender = "#f84668" # git branch fg
+
+[palettes.one_dark]
+# --- background ---
+crust = "#21252B"
+mantle = "#282C34"
+base = "#181825" # git branch bg
+
+surface0 = "#353B45"
+surface1 = "#3E4452"
+surface2 = "#484F5E"
+overlay0 = "#5C6370"
+overlay1 = "#636D83"
+overlay2 = "#ABB2BF"
+
+# --- text ---
+text = "#ABB2BF"
+subtext0 = "#5C6370"
+subtext1 = "#ABB2BF"
+
+# --- accents ---
+rosewater = "#ABB2BF"
+flamingo = "#E06C75"
+pink = "#C678DD"
+mauve = "#C678DD"
+red = "#E06C75"
+maroon = "#E06C75"
+peach = "#D19A66"
+yellow = "#E5C07B"
+green = "#98C379"
+teal = "#56B6C2"
+sky = "#56B6C2"
+sapphire = "#61AFEF" # dir fg
+blue = "#61AFEF"
+lavender = "#61AFEF"   # git branch fg

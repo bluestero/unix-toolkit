@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+"""k-appkey N [--dry]: what Super+N does for the Nth app in the dock.
+
+  app not running           -> launch it
+  running, not in front     -> bring its window to the front (a minimized one comes back)
+  running and in front      -> minimize that window
+
+Pinned apps count from the left (the dock's favorites list), like GNOME's own Super+N.
+Needs the Window Calls GNOME extension (./install.sh window-calls) to see and move
+windows; without it the app is only launched / raised the way GNOME does it.
+One short-lived process per key press; nothing runs in the background.
+"""
+import ast, glob, json, os, subprocess, sys
+
+DBUS = ["gdbus", "call", "--session", "--dest", "org.gnome.Shell",
+        "--object-path", "/org/gnome/Shell/Extensions/Windows", "--method"]
+APP_DIRS = ["~/.local/share/applications", "/usr/share/applications", "/usr/local/share/applications",
+            "/var/lib/snapd/desktop/applications", "/var/lib/flatpak/exports/share/applications",
+            "~/.local/share/flatpak/exports/share/applications"]
+
+
+def run(*a):
+    return subprocess.run(a, capture_output=True, text=True).stdout.strip()
+
+
+def favorites():
+    raw = run("gsettings", "get", "org.gnome.shell", "favorite-apps").removeprefix("@as ")
+    return ast.literal_eval(raw) if raw else []
+
+
+def desktop_file(app_id):
+    for d in APP_DIRS:
+        p = os.path.join(os.path.expanduser(d), app_id)
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def window_classes(path, app_id):
+    """lower-case names the app's windows may use as their class"""
+    names = {app_id.removesuffix(".desktop").lower()}
+    for line in open(path, errors="replace"):
+        if line.startswith("[Desktop Action"):
+            break
+        if line.startswith("StartupWMClass="):
+            names.add(line.split("=", 1)[1].strip().lower())
+        elif line.startswith("Exec="):
+            for tok in line.split("=", 1)[1].split():
+                if not tok.startswith(("env", "%", "-")) and "=" not in tok:
+                    names.add(os.path.basename(tok).lower())
+                    break
+    return names
+
+
+def windows():
+    out = run(*DBUS, "org.gnome.Shell.Extensions.Windows.List")
+    if not out:
+        return None
+    return json.loads(ast.literal_eval(out)[0])
+
+
+def main():
+    args = [a for a in sys.argv[1:] if a != "--dry"]
+    dry = "--dry" in sys.argv
+    if not args or not args[0].isdigit():
+        sys.exit("usage: k-appkey N [--dry]")
+    favs = favorites()
+    n = int(args[0])
+    if not 1 <= n <= len(favs):
+        return
+    app_id = favs[n - 1]
+    path = desktop_file(app_id)
+    if not path:
+        return
+    names = window_classes(path, app_id)
+    wins = windows()
+    mine = [w for w in (wins or []) if w["wm_class"].lower() in names or w["wm_class_instance"].lower() in names]
+    if wins is None or not mine:
+        action = ["gio", "launch", path]          # not running, or no Window Calls: GNOME raises it itself
+    else:
+        front = [w for w in mine if w["focus"]]
+        if front:
+            action = [*DBUS, "org.gnome.Shell.Extensions.Windows.Minimize", str(front[0]["id"])]
+        else:
+            action = [*DBUS, "org.gnome.Shell.Extensions.Windows.Activate", str(mine[0]["id"])]
+    if dry:
+        print(" ".join(action[-2:]) if action[0] == "gdbus" else " ".join(action))
+        return
+    subprocess.run(action, capture_output=True)
+
+
+main()

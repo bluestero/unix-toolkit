@@ -1,0 +1,953 @@
+#!/usr/bin/env bash
+# kx - Kubernetes context switcher that pairs with okcli.
+#
+# Each shell gets its own context and namespace: kx writes a tiny overlay
+# kubeconfig per shell and puts it in front of KUBECONFIG, so switching in one
+# terminal never moves another. Shells that haven't switched follow the global
+# default (current-context in ~/.kube/config), set with 'kx default'.
+#
+# EKS contexts can be linked to an okcli profile (AWS_PROFILE in the exec
+# credentials), so kubectl authenticates with the right account no matter
+# which AWS profile the shell is on.
+
+set -uo pipefail
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+ROOT="$(cd "$(dirname "$SELF")/../.." && pwd)"
+# shellcheck source=../../lib/ui.sh
+. "$ROOT/lib/ui.sh"
+# shellcheck source=../lib/resources.sh
+. "$ROOT/kube/lib/resources.sh"
+# shellcheck source=../lib/list.sh
+. "$ROOT/kube/lib/list.sh"
+UI_EVAL_FILE="${KX_EVAL_FILE:-}"
+
+KX_VERSION="1.1.0"
+BASE="${KX_BASE_KUBECONFIG:-${KUBECONFIG:-$HOME/.kube/config}}"
+BASE_FILE="${BASE%%:*}"               # where kx writes global changes
+SHELL_FILE="${KX_SHELL_FILE:-}"       # this shell's overlay (set by the hook)
+REGIONS="${KX_REGIONS:-us-east-1}"
+# Substring rewrites for short names: eks-shop-dev -> shop-dev. A layer (or your
+# shell) can add its own: KX_ALIAS_RULES="eks-= applications=apps" makes eks-applications-dev apps-dev.
+ALIAS_RULES="${KX_ALIAS_RULES:-eks-=}"
+S=$'\x1f'
+
+command -v kubectl >/dev/null || die "kubectl is not installed."
+
+# ---------------------------------------------------------------- reading ---
+
+# One row per context, from the merged view (so per-shell namespaces show):
+#   name cluster user namespace profile eks_cluster region account
+ctx_rows() {
+  kubectl config view -o jsonpath='{range .contexts[*]}C{"\t"}{.name}{"\t"}{.context.cluster}{"\t"}{.context.user}{"\t"}{.context.namespace}{"\n"}{end}{range .users[*]}U{"\t"}{.name}{"\t"}{range .user.exec.env[*]}{.name}={.value} {end}{"\t"}{range .user.exec.args[*]}{@} {end}{"\n"}{end}' 2>/dev/null |
+  awk -F'\t' '
+    $1 == "U" {
+      n = split($3, env, " ")
+      for (i = 1; i <= n; i++) if (env[i] ~ /^AWS_PROFILE=/) { sub(/^AWS_PROFILE=/, "", env[i]); prof[$2] = env[i] }
+      n = split($4, a, " ")
+      for (i = 1; i < n; i++) {
+        if (a[i] == "--cluster-name") eks[$2] = a[i+1]
+        if (a[i] == "--region") reg[$2] = a[i+1]
+        if (a[i] == "--profile") prof[$2] = a[i+1]
+      }
+      next
+    }
+    $1 == "C" { order[++c] = $2; cl[$2] = $3; us[$2] = $4; ns[$2] = $5 }
+    END {
+      for (i = 1; i <= c; i++) {
+        k = order[i]; u = us[k]; acct = ""
+        if (split(cl[k], p, ":") >= 6 && cl[k] ~ /^arn:aws:eks:/) { acct = p[5]; if (reg[u] == "") reg[u] = p[4] }
+        if (eks[u] == "" && cl[k] ~ /cluster\//) { e = cl[k]; sub(/.*cluster\//, "", e); eks[u] = e }
+        printf "%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\n", k, cl[k], u, ns[k], prof[u], eks[u], reg[u], acct
+      }
+    }'
+}
+
+ctx_names() { ctx_rows | cut -d"$S" -f1; }
+
+ctx_row() {
+  ctx_rows | awk -F'\037' -v n="$1" '$1 == n { print; f = 1 } END { exit !f }'
+}
+
+require_ctx() { ctx_row "$1" >/dev/null || die "No context named '$1' · see: kx ls"; }
+
+current_ctx() { kubectl config current-context 2>/dev/null; }
+
+# The global default: current-context in the base kubeconfig.
+default_ctx() { KUBECONFIG="$BASE" kubectl config current-context 2>/dev/null; }
+
+has_okcli() { command -v okcli >/dev/null; }
+
+_OKCLI_NAMES=""
+profile_exists() {   # true when okcli knows this profile (or okcli isn't installed)
+  has_okcli || return 0
+  [[ -n "$_OKCLI_NAMES" ]] || _OKCLI_NAMES=$'\n'"$(okcli __names 2>/dev/null)"$'\n'
+  [[ "$_OKCLI_NAMES" == *$'\n'"$1"$'\n'* ]]
+}
+
+# "account_id<TAB>label" from okcli, for friendlier ACCOUNT names.
+account_labels() { has_okcli && okcli __accounts 2>/dev/null; }
+
+profile_status() { has_okcli && okcli __status "$1" 2>/dev/null; }
+
+profile_fresh() {
+  local s; s=$(strip_ansi "$(profile_status "$1")")
+  [[ "$s" == ✓* || "$s" == !* ]]
+}
+
+group_of() {   # shop-dev -> shop ; data-prod -> data
+  local n="$1"
+  printf '%s' "${n%-@(dev|develop|test|qa|sbx|sandbox|lab|stage|staging|stg|uat|preprod|prod|production|prd)}"
+}
+
+short_name() {
+  local n="$1" rule
+  [[ "$n" == arn:aws:eks:*:cluster/* ]] && n=${n##*cluster/}
+  for rule in $ALIAS_RULES; do n=${n//"${rule%%=*}"/"${rule#*=}"}; done
+  printf '%s' "$n"
+}
+
+# --------------------------------------------------------------- rendering ---
+
+# Contexts grouped by name (apps-*, es-*, ...), dev before stage before prod.
+ordered_rows() {
+  local row name rank
+  ctx_rows | while IFS= read -r row; do
+    name=${row%%"$S"*}
+    case "$name" in
+      *prod*|*prd*) rank=3 ;;
+      *stag*|*stg*|*uat*|*qa*) rank=2 ;;
+      *) rank=1 ;;
+    esac
+    printf '%s\t%s\t%s\n' "$(group_of "$name")" "$rank" "$row"
+  done | awk -F'\t' '{ if (!($1 in g)) g[$1] = ++n; print g[$1] "\t" $0 }' |
+    sort -t$'\t' -k1,1n -k3,3n -s | cut -f4-
+}
+
+# Session cell for a linked AWS profile: "✓ 3h12m left", or "✗ expired → okcli refresh <p>"
+session_cell() {
+  local st; st=$(profile_status "$1")
+  [[ -n "$st" ]] || { printf '%s' "${C_DIM}linked${C_RESET}"; return; }
+  if [[ "$(strip_ansi "$st")" == *expired* ]]; then printf '%s  %s' "$st" "$(ui_hint "okcli refresh $1")"
+  else printf '%s' "$st"; fi
+}
+
+# The context table (header + rows); boxed by `kx ls`, bare inside the picker.
+context_rows() {
+  local cur def rows labels name cluster ns prof eks acct first env auth note lbl
+  rows=$(ordered_rows)
+  [[ -n "$rows" ]] || { warn "No contexts in $BASE. Add EKS clusters with 'kx sync'."; return 1; }
+  cur=$(current_ctx); def=$(default_ctx); labels=$(account_labels)
+  h() { printf '%s' "$C_BOLD$1$C_RESET"; }
+  printf '%s\n' "  $(h CONTEXT)$S$(h NAMESPACE)$S$(h 'SIGNS IN AS')$S$(h ENV)$S$(h SESSION)"
+  while IFS=$S read -r name cluster _ ns prof eks _ acct; do
+    if [[ "$name" == "$cur" ]]; then first="$(ui_mark_here) ${C_BOLD}$name${C_RESET}"; else first="  $name"; fi
+    [[ "$name" == "$def" ]] && first+=" $(ui_mark_default)"
+    lbl=$(awk -F'\t' -v a="$acct" '$1 == a { print $2; exit }' <<<"$labels")
+    env=$(env_badge "$name $eks")
+    if [[ -n "$prof" ]] && has_okcli && ! profile_exists "$prof"; then
+      auth="${C_RED}profile gone${C_RESET}  $(ui_hint 'kx tidy')"
+    elif [[ -n "$prof" ]]; then auth=$(profile_status "$prof"); [[ -n "$auth" ]] || auth="${C_DIM}linked${C_RESET}"
+    elif [[ -n "$acct" ]]; then prof="${C_YELLOW}not linked${C_RESET}"; auth=$(ui_hint "kx link $name")
+    else auth="${C_DIM}–${C_RESET}"; fi
+    printf "%s$S%s$S%s$S%s$S%s\n" "$first" "${ns:-${C_DIM}default${C_RESET}}" "$prof" "$env" "$auth"
+  done <<<"$rows"
+}
+
+cmd_ls() {
+  [[ -t 1 ]] || ui_no_color
+  local t n foot=""
+  t=$(context_rows) || return 1
+  # one fix for all expired sessions, in the bottom border, not one per row
+  n=$(strip_ansi "$t" | grep -c 'expired')
+  (( n )) && foot="${C_RED}$n expired${C_RESET} $(ui_hint 'okcli refresh')"
+  printf '%s\n' "$t" | ui_table "kx · kubernetes contexts" "$(ui_legend here default)" "$foot"
+}
+
+cmd_status() {
+  [[ -t 1 ]] || ui_no_color
+  local cur def row ns="" prof="" flag="" here
+  cur=$(current_ctx); def=$(default_ctx)
+  if [[ -z "$cur" ]]; then
+    printf 'context\t%s\n' "${C_DIM}none${C_RESET}  $(ui_hint kx)" | ui_fields kx; return
+  fi
+  local cluster="" eks="" acct="" lbl=""
+  row=$(ctx_row "$cur") && IFS=$S read -r _ cluster _ ns prof eks _ acct <<<"$row"
+  [[ -n "$acct" ]] && lbl=$(account_labels | awk -F'\t' -v a="$acct" '$1 == a { print $2; exit }')
+  is_prod "$cur" && flag=$(ui_badge PROD)
+  if [[ -n "$SHELL_FILE" && "${KUBECONFIG:-}" == "$SHELL_FILE"* ]]; then here="switched here  $(ui_hint 'kx off')"
+  else here="follows the default"; fi
+  {
+    printf 'context\t%s\n' "${C_BOLD}$cur${C_RESET} $(env_badge "$cur")"
+    printf 'namespace\t%s\n' "${ns:-default}"
+    printf 'cluster\t%s\n' "${eks:-${cluster##*/}}${lbl:+  ${C_DIM}in $lbl${C_RESET}}"
+    if [[ -n "$prof" ]]; then
+      printf 'signs in as\t%s\n' "$prof"
+      has_okcli && printf 'session\t%s\n' "$(session_cell "$prof")"
+    fi
+    local dns; dns=$(base_ns "$def")
+    if [[ "$def" == "$cur" && "${dns:-default}" == "${ns:-default}" ]]; then printf 'new terminals\t%s\n' "${C_DIM}same${C_RESET}"
+    elif [[ "$def" == "$cur" ]]; then printf 'new terminals\t%s\n' "${C_DIM}same context${C_RESET} · namespace ${dns:-default}"
+    else printf 'new terminals\t%s\n' "${def:-${C_DIM}none${C_RESET}}${def:+ · namespace ${dns:-default}}"; fi
+    printf 'this terminal\t%s\n' "$here"
+  } | ui_fields kx "$flag"
+}
+
+pick_ctx() {
+  local header="$1" table pos out key sel cur
+  table=$(context_rows) || return 1
+  cur=$(current_ctx)
+  pos=$(ctx_names | awk -v c="$cur" '$0 == c { print NR; exit }')
+  if [[ -z "$pos" ]]; then   # never start the cursor on prod
+    pos=$(ctx_names | awk -v pat="$NONPROD_PATTERN" '$0 ~ pat { print NR; exit }')
+  fi
+  out=$(printf '%s\n' "$table" | ui_fzf 'kx · kubernetes' --sortable --header-lines=1 --prompt='context> ' \
+    --header="$header" --expect=alt-enter,ctrl-x --bind="$(ui_live_onload "${pos:-1}")" \
+    --live-rows="$(printf %q "$SELF") __ctxrows" --toast \
+    --bind="ctrl-d:transform:$(printf %q "$SELF") __pickdef {n} {}") || return 1
+  key=$(sed -n 1p <<<"$out")
+  sel=$(strip_ansi "$(sed -n 2p <<<"$out")" | awk '{ print ($1 == "●") ? $2 : $1 }')
+  [[ -n "$sel" ]] && printf '%s\t%s\n' "${key:-enter}" "$sel"
+}
+
+# ---------------------------------------------------------------- actions ---
+
+need_shell() {
+  [[ -n "$SHELL_FILE" && -n "$UI_EVAL_FILE" ]] && return 0
+  warn "The kx shell hook isn't loaded, so this shell can't be changed."
+  info "    Source $ROOT/shell/init.sh from ~/.bashrc (or use 'kx default <ctx>' for a global change)."
+  exit 1
+}
+
+yaml_q() { local s=${1//\\/\\\\}; printf '"%s"' "${s//\"/\\\"}"; }
+
+# Writes this shell's overlay: current-context plus a copy of that context
+# (so a per-shell namespace overrides the one in ~/.kube/config).
+write_overlay() {
+  local name="$1" cluster="$2" user="$3" ns="$4" tmp
+  mkdir -p "$(dirname "$SHELL_FILE")" && chmod 700 "$(dirname "$SHELL_FILE")"
+  tmp=$(umask 077; mktemp "$SHELL_FILE.XXXX") || die "Cannot write $SHELL_FILE"
+  {
+    printf 'apiVersion: v1\nkind: Config\npreferences: {}\n'
+    printf 'current-context: %s\n' "$(yaml_q "$name")"
+    printf 'contexts:\n- name: %s\n  context:\n    cluster: %s\n    user: %s\n' \
+      "$(yaml_q "$name")" "$(yaml_q "$cluster")" "$(yaml_q "$user")"
+    if [[ -n "$ns" ]]; then printf '    namespace: %s\n' "$(yaml_q "$ns")"; fi
+  } >"$tmp" && mv -f "$tmp" "$SHELL_FILE" || { rm -f "$tmp"; die "Cannot write $SHELL_FILE"; }
+  emit_eval "export KUBECONFIG=$(printf %q "$SHELL_FILE:$BASE")"
+}
+
+# Overlays of shells that are gone.
+prune_overlays() {
+  local f pid
+  for f in "$(dirname "${SHELL_FILE:-/nonexistent/x}")"/shell-*.yaml*; do
+    [[ -e "$f" ]] || continue
+    pid=${f##*/shell-}; pid=${pid%%.*}
+    [[ "$pid" =~ ^[0-9]+$ ]] && ! kill -0 "$pid" 2>/dev/null && rm -f "$f"
+  done
+}
+
+do_switch() {
+  local name="$1" ns_override="${2-__keep__}" row cluster user ns prof cur
+  row=$(ctx_row "$name") || die "No context named '$name' · see: kx ls"
+  IFS=$S read -r _ cluster user ns prof _ _ _ <<<"$row"
+  [[ "$ns_override" != __keep__ ]] && ns="$ns_override"
+  need_shell
+  cur=$(current_ctx)
+
+  if [[ -n "$prof" ]] && has_okcli && ! profile_fresh "$prof"; then
+    if confirm "AWS credentials for '$prof' (used by $name) are expired. Refresh now?"; then
+      okcli refresh "$prof" || warn "Refresh failed; switching anyway."
+    fi
+  fi
+
+  write_overlay "$name" "$cluster" "$user" "$ns"
+  [[ -n "$cur" && "$cur" != "$name" ]] && emit_eval "export KX_PREV=$(printf %q "$cur")"
+  prune_overlays
+  ok "Switched to ${C_BOLD}$name${C_RESET}  ${C_DIM}namespace ${ns:-default}${prof:+ · signs in as $prof} · this terminal${C_RESET}"
+  if is_prod "$name"; then warn "${C_RED}${C_BOLD}This is a PROD cluster.${C_RESET} Tread carefully."; fi
+}
+
+# ctrl-d in the context picker: the picker stays open (see ui_live_reload). The
+# default is written in the background; on prod it asks first, in a small box.
+# Only new terminals move: cmd_pick pins this one when the picker closes.
+pick_default() {   # row-position row-text
+  local name; name=$(strip_ansi "$2" | awk '{ print ($1 == "●") ? $2 : $1 }')
+  [[ -n "$name" ]] || return 0
+  if is_prod "$name"; then printf 'execute(%s __setdef %q)+' "$SELF" "$name"
+  else printf 'execute-silent(%s __setdef %q)+' "$SELF" "$name"; fi
+  printf 'transform(%s __toast ctx %q)+' "$SELF" "$name"
+  ui_live_reload "$1"
+}
+
+# The footer message after ctrl-d (said only if the default really changed).
+default_toast() {   # ctx <name> | ns <name>
+  if [[ "$1" == ctx ]]; then
+    if [[ "$(default_ctx)" == "$2" ]]; then ui_toast "${C_GREEN}✓${C_RESET} Default is now $2 · new terminals start on it · this terminal stays as it is"
+    else ui_toast "${C_DIM}Default unchanged.${C_RESET}"; fi
+  else
+    if [[ "$(base_ns "$KX_NS_CTX")" == "$2" ]]; then ui_toast "${C_GREEN}✓${C_RESET} Default namespace on $KX_NS_CTX is now $2 · new terminals start on it · this terminal stays as it is"
+    else ui_toast "${C_RED}✗ Couldn't set the default namespace.${C_RESET}"; fi
+  fi
+}
+
+# A terminal that hasn't switched follows the default. When a picker changed the
+# default, pin this terminal to what it was on, so only new terminals move.
+keep_here() {   # context namespace
+  [[ -n "$1" && -n "$SHELL_FILE" && -n "$UI_EVAL_FILE" ]] || return 0
+  [[ "${KUBECONFIG:-}" == "$SHELL_FILE"* ]] && return 0
+  local row cluster user
+  row=$(ctx_row "$1") || return 0
+  IFS=$S read -r _ cluster user _ _ _ _ _ <<<"$row"
+  write_overlay "$1" "$cluster" "$user" "$2"
+}
+
+# The namespace in the base kubeconfig for a context: what new terminals start on.
+base_ns() { KUBECONFIG="$BASE_FILE" kubectl config view -o jsonpath="{.contexts[?(@.name==\"$1\")].context.namespace}" 2>/dev/null; }
+
+cmd_pick() {
+  if [[ ! -t 1 || ! -t 0 ]] || ! command -v fzf >/dev/null; then cmd_ls; return; fi
+  local picked key name cur0 ns0 def0 rc=0
+  cur0=$(current_ctx); ns0=$(ctx_row "$cur0" 2>/dev/null | cut -d"$S" -f4); def0=$(default_ctx)
+  picked=$(pick_ctx "enter: switch · alt-enter: switch + namespace · ctrl-d: make default · ctrl-x: hide · esc: cancel") || rc=$?
+  [[ "$(default_ctx)" == "$def0" ]] || keep_here "$cur0" "$ns0"
+  (( rc )) && return 0
+  key=${picked%%$'\t'*}; name=${picked#*$'\t'}
+  case "$key" in
+    ctrl-x) cmd_ignore "$name" ;;
+    alt-enter) do_switch "$name" && KUBECONFIG="$SHELL_FILE:$BASE" cmd_ns ;;
+    *) do_switch "$name" ;;
+  esac
+}
+
+cmd_prev() {
+  [[ -n "${KX_PREV:-}" ]] || die "No previous context in this shell."
+  do_switch "$KX_PREV"
+}
+
+# Rows of the namespace picker: name<TAB>what shows (list in $KX_NS_LIST).
+ns_rows() {
+  local def; def=$(base_ns "$KX_NS_CTX")
+  awk -v c="$KX_NS_THIS" -v d="${def:-default}" -v m="${C_DIM}default${C_RESET}" '
+    { printf "%s\t%s%s%s\n", $0, ($0 == c ? "* " : "  "), $0, ($0 == d ? "  " m : "") }' "$KX_NS_LIST"
+}
+
+cmd_ns() {
+  local cur row cluster user ns target list out
+  cur=$(current_ctx); [[ -n "$cur" ]] || die "No current context. Pick one with 'kx'."
+  row=$(ctx_row "$cur") || die "Current context '$cur' not found."
+  IFS=$S read -r _ cluster user ns _ _ _ _ <<<"$row"
+  target="${1:-}"
+  if [[ "$target" == "-" ]]; then target="${KX_PREV_NS:-}"; [[ -n "$target" ]] || die "No previous namespace."; fi
+  if [[ -z "$target" ]]; then
+    if [[ -t 0 && -t 1 ]] && command -v fzf >/dev/null; then
+      info "${C_DIM}Listing namespaces on $cur...${C_RESET}"
+      list=$(timeout 15 kubectl get namespaces -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null) ||
+        die "Couldn't list namespaces on $cur (auth or network?). Give one: kx ns <name>"
+      local q nsl; q=$(printf %q "$SELF"); nsl=$(mktemp) || die "Cannot make a temp file."
+      printf '%s\n' "$list" >"$nsl"
+      local def0; def0=$(base_ns "$cur")
+      out=$(KX_NS_CTX="$cur" KX_NS_THIS="${ns:-default}" KX_NS_LIST="$nsl" ns_rows |
+        KX_NS_CTX="$cur" KX_NS_THIS="${ns:-default}" KX_NS_LIST="$nsl" ui_fzf "kx · $cur" --prompt='namespace> ' \
+          --header='enter: use · ctrl-d: make default · esc: cancel' \
+          --delimiter=$'\t' --with-nth=2 --track --id-nth=1 \
+          --toast --bind="ctrl-d:execute-silent($q __nsdef {1})+transform($q __toast ns {1})+reload($q __nsrows)"); rm -f "$nsl"
+      target=$(sed -n 1p <<<"$out" | cut -f1)
+      [[ "$(base_ns "$cur")" == "$def0" ]] || keep_here "$cur" "$ns"
+      [[ -n "$target" ]] || return 0
+    else
+      printf '%s\n' "${ns:-default}"; return 0
+    fi
+  fi
+  need_shell
+  write_overlay "$cur" "$cluster" "$user" "$target"
+  emit_eval "export KX_PREV_NS=$(printf %q "${ns:-default}")"
+  ok "Namespace ${C_BOLD}$target${C_RESET} on $cur  ${C_DIM}this terminal${C_RESET}"
+}
+
+set_default() {
+  local name="$1"
+  require_ctx "$name"
+  if is_prod "$name"; then
+    warn "'$name' is a ${C_RED}${C_BOLD}PROD${C_RESET} cluster: every shell that hasn't switched would point at it."
+    confirm "Make it the default anyway?" n || { info "Default unchanged."; return 1; }
+  fi
+  KUBECONFIG="$BASE" kubectl config use-context "$name" >/dev/null || die "Couldn't set the default."
+  ok "Default is now ${C_BOLD}$name${C_RESET}. New terminals (and shells you haven't switched) use it."
+}
+
+# The namespace new terminals start on, for one context (written to the base config).
+set_default_ns() { KUBECONFIG="$BASE_FILE" kubectl config set-context "$1" --namespace="$2" >/dev/null; }
+
+cmd_default() {
+  case "${1:-}" in
+    "") local d; d=$(default_ctx); [[ -n "$d" ]] && printf '%s\n' "$d" || { info "No default context."; return 1; } ;;
+    *) set_default "$1" || return 1
+       if [[ -n "${2:-}" ]]; then
+         set_default_ns "$1" "$2" || die "Couldn't set the default namespace."
+         ok "Default namespace on ${C_BOLD}$1${C_RESET} is now ${C_BOLD}$2${C_RESET}."
+       fi ;;
+  esac
+}
+
+cmd_off() {
+  need_shell
+  rm -f "$SHELL_FILE"
+  if [[ "${KX_BASE_WAS_SET:-}" == 1 ]]; then emit_eval "export KUBECONFIG=$(printf %q "$BASE")"
+  else emit_eval "unset KUBECONFIG"; fi
+  ok "This shell follows the default again ($(default_ctx || echo none))."
+}
+
+cmd_current() { local cur; cur=$(current_ctx) && [[ -n "$cur" ]] && printf '%s\n' "$cur"; }
+
+# For ctx and scripts: "context<TAB>namespace<TAB>aws-profile" (empty if none)
+internal_current() {
+  local cur row ns="" prof=""
+  cur=$(current_ctx); [[ -n "$cur" ]] || return 1
+  row=$(ctx_row "$cur") && IFS=$S read -r _ _ _ ns prof _ _ _ <<<"$row"
+  printf '%s\t%s\t%s\n' "$cur" "${ns:-default}" "$prof"
+}
+
+backup_base() {
+  [[ -f "$BASE_FILE" ]] || return 0
+  cp -p "$BASE_FILE" "$BASE_FILE.kx-bak" && info "${C_DIM}Backup: $BASE_FILE.kx-bak${C_RESET}"
+}
+
+ctx_user() { ctx_row "$1" | cut -d"$S" -f3; }
+
+# Best okcli profile for an AWS account: read-only for prod, else this
+# shell's profile, the okcli default, then the first match.
+suggest_profile() {
+  local acct="$1" ctx="$2" rows cand
+  has_okcli || return 0
+  rows=$(okcli __profiles 2>/dev/null | awk -F'\t' -v a="$acct" '$2 == a')
+  [[ -n "$rows" ]] || return 0
+  # Dedicated EKS roles first (eks-<context>-read for prod, -admin otherwise).
+  local pref
+  if is_prod "$ctx"; then pref="eks-$ctx-read eks-$ctx-admin"; else pref="eks-$ctx-admin eks-$ctx-read"; fi
+  for cand in $pref; do
+    awk -F'\t' -v c="$cand" '$4 == c { f = 1 } END { exit !f }' <<<"$rows" &&
+      { awk -F'\t' -v c="$cand" '$4 == c { print $1; exit }' <<<"$rows"; return; }
+  done
+  if is_prod "$ctx"; then
+    cand=$(awk -F'\t' 'tolower($4) ~ /read ?only|readonly|-ro$/ { print $1; exit }' <<<"$rows")
+    [[ -n "$cand" ]] && { echo "$cand"; return; }
+  fi
+  for cand in "${AWS_PROFILE:-}" "$(okcli default 2>/dev/null)"; do
+    [[ -n "$cand" ]] && awk -F'\t' -v c="$cand" '$1 == c { f = 1 } END { exit !f }' <<<"$rows" && { echo "$cand"; return; }
+  done
+  cut -f1 <<<"$rows" | head -n1
+}
+
+link_profile() {   # ctx profile
+  local user; user=$(ctx_user "$1")
+  KUBECONFIG="$BASE" kubectl config set-credentials "$user" --exec-env "AWS_PROFILE=$2" >/dev/null
+}
+
+cmd_link() {
+  [[ $# -ge 1 ]] || die "Usage: kx link <context> [okcli-profile]"
+  local name="$1" prof="${2:-}" acct
+  require_ctx "$name"
+  acct=$(ctx_row "$name" | cut -d"$S" -f8)
+  if [[ -z "$prof" ]]; then
+    has_okcli && [[ -t 0 ]] && command -v fzf >/dev/null || die "Give a profile: kx link $name <okcli-profile>"
+    prof=$(okcli __profiles | awk -F'\t' -v a="$acct" '$2 == a || a == "" { printf "%-14s %s / %s\n", $1, $3, $4 }' |
+      ui_fzf "link $name" --prompt='profile> ' --header="AWS profile kubectl should use for $name" | awk '{ print $1 }') || return 0
+    [[ -n "$prof" ]] || return 0
+  fi
+  backup_base
+  link_profile "$name" "$prof" || die "Couldn't update the credentials for $name."
+  ok "$name now authenticates as ${C_BOLD}$prof${C_RESET} (whatever the shell's AWS_PROFILE)."
+}
+
+cmd_unlink() {
+  [[ $# -eq 1 ]] || die "Usage: kx unlink <context>"
+  require_ctx "$1"
+  KUBECONFIG="$BASE" kubectl config set-credentials "$(ctx_user "$1")" --exec-env AWS_PROFILE- >/dev/null
+  ok "$1 now uses the shell's AWS_PROFILE."
+}
+
+cmd_rename() {
+  [[ $# -eq 2 ]] || die "Usage: kx rename <old> <new>"
+  require_ctx "$1"
+  ctx_row "$2" >/dev/null && die "A context named '$2' already exists."
+  backup_base
+  KUBECONFIG="$BASE" kubectl config rename-context "$1" "$2" >/dev/null || die "Rename failed."
+  [[ "$(current_ctx)" == "$1" ]] && [[ -n "$SHELL_FILE" && -f "$SHELL_FILE" ]] && do_switch "$2" >/dev/null 2>&1
+  ok "Renamed $1 → $2"
+}
+
+# Short names for ARN contexts + link each EKS context to an okcli profile.
+cmd_tidy() {
+  local yes=0 rows name cluster user prof eks acct new plan="" n=0
+  [[ "${1:-}" == "--yes" || "${1:-}" == "-y" ]] && yes=1
+  rows=$(ctx_rows)
+  while IFS=$S read -r name cluster user _ prof eks _ acct; do
+    new="$name"
+    [[ "$name" == arn:aws:eks:* ]] && new=$(short_name "${eks:-$name}")
+    local np=""
+    if [[ -n "$acct" ]] && { [[ -z "$prof" ]] || ! profile_exists "$prof"; }; then np=$(suggest_profile "$acct" "$new")
+    elif [[ -n "$acct" && "$prof" != eks-* ]]; then
+      # Linked to a general role while a dedicated eks-<context>-* role exists: suggest it.
+      np=$(suggest_profile "$acct" "$new"); [[ "$np" == eks-* && "$np" != "$prof" ]] || np=""
+    fi
+    [[ "$new" == "$name" && -z "$np" ]] && continue
+    plan+="$name"$'\t'"$new"$'\t'"$np"$'\n'; n=$((n + 1))
+  done <<<"$rows"
+  [[ $n -gt 0 ]] || { ok "Nothing to tidy."; return 0; }
+
+  info "${C_BOLD}kx tidy will:${C_RESET}"
+  while IFS=$'\t' read -r name new np; do
+    [[ -n "$name" ]] || continue
+    if [[ "$new" != "$name" ]]; then info "  rename  ${C_DIM}$name${C_RESET} → ${C_BOLD}$new${C_RESET}"; fi
+    if [[ -n "$np" ]]; then info "  link    $new → AWS profile ${C_BOLD}$np${C_RESET}"; fi
+  done <<<"$plan"
+  if [[ $yes -eq 0 ]]; then confirm "Apply?" || { info "Nothing changed."; return 0; }; fi
+
+  backup_base
+  while IFS=$'\t' read -r name new np; do
+    [[ -n "$name" ]] || continue
+    if [[ "$new" != "$name" ]]; then
+      if ctx_row "$new" >/dev/null; then warn "Skipping rename of $name: '$new' exists."; new="$name"
+      else KUBECONFIG="$BASE" kubectl config rename-context "$name" "$new" >/dev/null && ok "renamed $new"; fi
+    fi
+    if [[ -n "$np" ]]; then link_profile "$new" "$np" && ok "linked $new → $np"; fi
+  done <<<"$plan"
+  info "${C_DIM}Change any link with: kx link <context> <okcli-profile>${C_RESET}"
+}
+
+# ----------------------------------------------------------- ignore list ---
+# ~/.config/kx/ignore: AWS accounts and EKS clusters that kx sync skips.
+# One per line, an account id (12 digits) or a cluster name, then "# note".
+IGNORE_FILE="${KX_IGNORE_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/kx/ignore}"
+
+ignored() { [[ -r "$IGNORE_FILE" ]] && sed 's/#.*//' "$IGNORE_FILE" | awk 'NF { print $1 }'; }
+is_ignored() { ignored | grep -qxF "$1"; }
+ignore_init() {
+  [[ -s "$IGNORE_FILE" ]] && return 0
+  mkdir -p "$(dirname "$IGNORE_FILE")"
+  printf '%s\n' "# kx sync skips these. One per line: an AWS account id or an EKS cluster name." \
+    "# Change with: kx ignore <name> · kx unignore <name> · kx ignore edit" >"$IGNORE_FILE"
+}
+ignore_add() {   # entry note
+  is_ignored "$1" && return 0
+  ignore_init
+  printf '%-40s # %s\n' "$1" "$2" >>"$IGNORE_FILE"
+}
+ignore_del() {
+  [[ -f "$IGNORE_FILE" ]] || return 0
+  local tmp; tmp=$(mktemp) || return 1
+  awk -v e="$1" '{ l = $0; sub(/#.*/, "", l); split(l, f, " ") } f[1] != e' "$IGNORE_FILE" >"$tmp" &&
+    cat "$tmp" >"$IGNORE_FILE"; rm -f "$tmp"
+}
+
+# Deletes a context from the base kubeconfig, plus its cluster and user
+# entries when no other context uses them.
+remove_ctx() {
+  local name="$1" row cluster user others
+  row=$(KUBECONFIG="$BASE_FILE" kubectl config view -o jsonpath='{range .contexts[*]}{.name}{"\t"}{.context.cluster}{"\t"}{.context.user}{"\n"}{end}' 2>/dev/null)
+  IFS=$'\t' read -r _ cluster user < <(awk -F'\t' -v n="$name" '$1 == n' <<<"$row")
+  others=$(awk -F'\t' -v n="$name" '$1 != n' <<<"$row")
+  [[ "$(default_ctx)" == "$name" ]] && KUBECONFIG="$BASE_FILE" kubectl config unset current-context >/dev/null
+  KUBECONFIG="$BASE_FILE" kubectl config delete-context "$name" >/dev/null 2>&1 || return 1
+  [[ -n "$cluster" ]] && ! cut -f2 <<<"$others" | grep -qxF "$cluster" &&
+    KUBECONFIG="$BASE_FILE" kubectl config delete-cluster "$cluster" >/dev/null 2>&1
+  [[ -n "$user" ]] && ! cut -f3 <<<"$others" | grep -qxF "$user" &&
+    KUBECONFIG="$BASE_FILE" kubectl config delete-user "$user" >/dev/null 2>&1
+  # This terminal was on it: fall back to the default.
+  if [[ "$(current_ctx)" == "$name" && -n "$SHELL_FILE" && -n "$UI_EVAL_FILE" ]]; then
+    rm -f "$SHELL_FILE"
+    if [[ "${KX_BASE_WAS_SET:-}" == 1 ]]; then emit_eval "export KUBECONFIG=$(printf %q "$BASE")"
+    else emit_eval "unset KUBECONFIG"; fi
+  fi
+  return 0
+}
+
+# Removes contexts from ~/.kube/config. kx sync offers them again.
+cmd_rm() {
+  [[ $# -ge 1 ]] || die "Usage: kx rm <context>...  (kx ignore <context> also stops kx sync re-adding it)"
+  local n; for n in "$@"; do require_ctx "$n"; done
+  confirm "Remove $* from $BASE_FILE?" n || { info "Nothing changed."; return 0; }
+  backup_base
+  for n in "$@"; do remove_ctx "$n" && ok "removed $n" || warn "couldn't remove $n"; done
+  info "${C_DIM}kx sync can add them back. To stop it offering them: kx ignore <context>${C_RESET}"
+}
+
+# kx ignore                        the list
+# kx ignore <context|cluster|account>...   add (and remove matching contexts)
+# kx ignore edit                   open the file
+cmd_ignore() {
+  case "${1:-}" in
+    "") ignore_show; return ;;
+    edit)
+      ignore_init
+      "${VISUAL:-${EDITOR:-nano}}" "$IGNORE_FILE"; return ;;
+  esac
+  local arg rows labels entry note gone="" name eks acct lbl
+  rows=$(ctx_rows); labels=$(account_labels)
+  local -a add=()
+  for arg in "$@"; do
+    entry=""; note=""
+    # An account: id or its okcli label.
+    if [[ "$arg" =~ ^[0-9]{12}$ ]]; then entry=$arg; note=$(awk -F'\t' -v a="$arg" '$1 == a { print $2; exit }' <<<"$labels")
+    elif lbl=$(awk -F'\t' -v l="$arg" '$2 == l { print $1; exit }' <<<"$labels") && [[ -n "$lbl" ]]; then entry=$lbl; note=$arg
+    fi
+    if [[ -n "$entry" ]]; then
+      note="account${note:+ $note}"
+      gone+=$(awk -F"$S" -v a="$entry" '$8 == a { print $1 }' <<<"$rows")$'\n'
+    else
+      # A context (stored as its EKS cluster name) or a cluster name.
+      while IFS=$S read -r name _ _ _ _ eks _ acct; do
+        if [[ "$name" == "$arg" || ( -n "$eks" && "$eks" == "$arg" ) ]]; then
+          entry=${eks:-$name}; note="cluster, was context $name"; gone+="$name"$'\n'
+        fi
+      done <<<"$rows"
+      [[ -n "$entry" ]] || { entry=$arg; note="cluster"; }
+    fi
+    add+=("$entry"$'\t'"$note")
+  done
+  gone=$(grep . <<<"$gone" | sort -u)
+  if [[ -n "$gone" ]]; then
+    confirm "Remove $(tr '\n' ' ' <<<"$gone")from $BASE_FILE and skip it in kx sync?" n || { info "Nothing changed."; return 0; }
+    backup_base
+    while IFS= read -r name; do remove_ctx "$name" && ok "removed $name"; done <<<"$gone"
+  fi
+  for entry in "${add[@]}"; do
+    ignore_add "${entry%%$'\t'*}" "${entry#*$'\t'}"
+    ok "kx sync skips ${C_BOLD}${entry%%$'\t'*}${C_RESET} ${C_DIM}(${entry#*$'\t'})${C_RESET}"
+  done
+  info "${C_DIM}Undo: kx unignore <name> · list: kx ignore${C_RESET}"
+}
+
+ignore_show() {
+  local list; list=$(ignored)
+  [[ -n "$list" ]] || { info "Nothing ignored. kx sync offers every account and cluster."
+    info "${C_DIM}Skip one: kx ignore <context|cluster|account> · or untick it in kx sync${C_RESET}"; return 0; }
+  { printf '%s\n' "${C_BOLD}SKIPPED${C_RESET}$S${C_BOLD}NOTE${C_RESET}"
+    sed -n 's/^[[:space:]]*\([^#[:space:]][^[:space:]]*\)[[:space:]]*\(#[[:space:]]*\(.*\)\)\{0,1\}$/\1\x1f\3/p' "$IGNORE_FILE"
+  } | ui_table "kx · ignored by kx sync" "" "$(ui_hint 'kx unignore <name> · kx ignore edit')"
+}
+
+cmd_unignore() {
+  [[ $# -ge 1 ]] || die "Usage: kx unignore <account|cluster>...  (see: kx ignore)"
+  local a e labels; labels=$(account_labels)
+  for a in "$@"; do
+    e=$a
+    is_ignored "$e" || e=$(awk -F'\t' -v l="$a" '$2 == l { print $1; exit }' <<<"$labels")
+    # A context name that was ignored: the file has its cluster name.
+    [[ -n "$e" ]] && is_ignored "$e" || e=$(grep -F "was context $a" "$IGNORE_FILE" 2>/dev/null | awk '{ print $1; exit }')
+    if [[ -n "$e" ]] && is_ignored "$e"; then ignore_del "$e"; ok "kx sync offers ${C_BOLD}$e${C_RESET} again"
+    else warn "$a isn't in the ignore list (kx ignore shows it)"; fi
+  done
+  info "${C_DIM}Add it back now: kx sync${C_RESET}"
+}
+
+# Finds EKS clusters across your AWS accounts and adds the ones you tick.
+#   kx sync            checklist of accounts → clusters (needs okcli)
+#   kx sync <profile>  just the clusters that one AWS profile can see
+cmd_sync() {
+  local yes=0
+  [[ "${1:-}" == "--yes" || "${1:-}" == "-y" ]] && { yes=1; shift; }
+  command -v aws >/dev/null || die "The aws CLI is not installed."
+  local interactive=0
+  (( yes == 0 )) && [[ -t 0 && -t 1 ]] && command -v fzf >/dev/null && interactive=1
+  local ign; ign=$(ignored)
+  _ign() { grep -qxF "$1" <<<"$ign"; }
+
+  # 1. Which accounts (and which profiles to try in each). Ignored accounts
+  #    start unticked; what you untick is remembered in the ignore list.
+  local -a plan=()   # "acct<TAB>label<TAB>profile profile ..."
+  if [[ $# -ge 1 ]]; then
+    plan=("-"$'\t'"$1"$'\t'"$1")
+  else
+    has_okcli || die "Give a profile (kx sync <aws-profile>), or install okcli for the account checklist."
+    local accts picked a l bind="" i=0 n_ign=0
+    # Per account, profiles in the order to try: ReadOnly, eks-*-read, the rest.
+    accts=$(okcli __profiles 2>/dev/null | awk -F'\t' '
+      { r = tolower($4); k = (r ~ /readonly|read-only|-ro$/) ? 1 : (r ~ /^eks-.*-read$/) ? 2 : (r ~ /^eks-/) ? 4 : 3
+        print $2 "\t" $3 "\t" k "\t" $1 }' | sort -t$'\t' -k1,1 -k3,3n |
+      awk -F'\t' '{ if ($1 != last) { if (last != "") print line; line = $1 "\t" $2 "\t" $4; last = $1 } else line = line " " $4 }
+                  END { if (last != "") print line }')
+    [[ -n "$accts" ]] || die "okcli has no profiles yet. Run 'okcli sync' first."
+    if (( interactive )); then
+      while IFS=$'\t' read -r a _ _; do
+        i=$((i + 1)); _ign "$a" && bind+="+pos($i)+deselect"
+      done <<<"$accts"
+      picked=$({ printf 'ACCOUNT\x1fID\x1fROLES\x1f\n'
+        while IFS=$'\t' read -r a l p; do
+          set -- $p
+          printf '%s\x1f%s\x1f%s%d role%s%s\x1f%s\n' "$l" "$a" "$C_DIM" $# "$([[ $# -eq 1 ]] || echo s)" "$C_RESET" \
+            "$(_ign "$a" && printf '%s' "${C_DIM}ignored${C_RESET}")"
+        done <<<"$accts"; } |
+        ui_fzf 'kx sync · which AWS accounts?' --sortable --multi --header-lines=1 --marker='✓' --prompt='filter> ' \
+          --header='tab: tick/untick · ctrl-a: all/none · enter: search the ticked · unticked ones are skipped from now on' \
+          --bind="load:select-all${bind}+first,ctrl-a:toggle-all" | awk '{ print $2 }') || { info "Cancelled."; return 0; }
+      # Remember the choice: unticked → ignore list, ticked → off it.
+      while IFS=$'\t' read -r a l _; do
+        if grep -qxF "$a" <<<"$picked"; then _ign "$a" && ignore_del "$a"
+        else _ign "$a" || { ignore_add "$a" "account $l"; n_ign=$((n_ign + 1)); }; fi
+      done <<<"$accts"
+      (( n_ign )) && info "${C_DIM}$n_ign account(s) skipped from now on · kx ignore shows them${C_RESET}"
+      ign=$(ignored)
+      [[ -n "$picked" ]] || { info "No accounts ticked."; return 0; }
+      accts=$(awk -F'\t' 'NR == FNR { want[$1] = 1; next } $1 in want' <(printf '%s\n' "$picked") <(printf '%s\n' "$accts"))
+    else
+      accts=$(awk -F'\t' 'NR == FNR { if (NF) skip[$1] = 1; next } !($1 in skip)' <(printf '%s\n' "$ign") <(printf '%s\n' "$accts"))
+      [[ -n "$accts" ]] || { info "Every account is in the ignore list (kx ignore)."; return 0; }
+    fi
+    mapfile -t plan <<<"$accts"
+  fi
+
+  # 2. Probe: first profile that can list clusters wins, per account.
+  local line acct label profs p region out c found="" ok_prof
+  for line in "${plan[@]}"; do
+    IFS=$'\t' read -r acct label profs <<<"$line"
+    ok_prof=""
+    for p in $profs; do
+      if has_okcli && okcli __names 2>/dev/null | grep -qxF "$p" && ! profile_fresh "$p"; then
+        okcli refresh "$p" >/dev/null 2>&1 || continue
+      fi
+      local any=0 got=""
+      for region in $REGIONS; do
+        out=$(AWS_PROFILE="$p" timeout 30 aws eks list-clusters --region "$region" --query 'clusters[]' --output text 2>/dev/null) || continue
+        any=1
+        for c in $out; do got+="$acct"$'\t'"$label"$'\t'"$region"$'\t'"$c"$'\t'"$p"$'\n'; done
+      done
+      if (( any )); then ok_prof=$p; found+="$got"; break; fi
+    done
+    if [[ -n "$ok_prof" ]]; then
+      local n; n=$(grep -c "^$acct"$'\t' <<<"$found" || true)
+      info "  ${C_BOLD}$label${C_RESET}  ${C_DIM}via $ok_prof:${C_RESET} $n cluster(s)"
+    else
+      warn "$label: none of its roles can list EKS clusters (tried: $profs)"
+    fi
+  done
+  found=${found%$'\n'}
+  [[ -n "$found" ]] || { info "No clusters found."; return 0; }
+
+  # 3. Cluster checklist: everything ticked but ignored clusters. Unticking an
+  #    added one removes it; unticked ones are skipped from now on.
+  local ctxs rows S2=$'\x1f' alias status table chosen have bind="" i=0
+  ctxs=$(ctx_rows | awk -F"$S" '$6 != "" { print $6 "\t" $1 }')   # eks-cluster<TAB>context
+  rows=""
+  while IFS=$'\t' read -r acct label region c p; do
+    i=$((i + 1))
+    have=$(awk -F'\t' -v c="$c" '$1 == c { print $2; exit }' <<<"$ctxs")
+    alias=${have:-$(short_name "$c")}
+    if [[ -n "$have" ]]; then status="added"
+    elif _ign "$c"; then status="ignored"; bind+="+pos($i)+deselect"
+    else status="new"; fi
+    rows+="$alias$S2$c$S2$label$S2$region$S2$(env_badge "$alias")$S2$status$S2$p"$'\n'
+  done <<<"$found"
+  table=$({ printf "CONTEXT${S2}CLUSTER${S2}ACCOUNT${S2}REGION${S2}ENV${S2}${S2}FOUND VIA\n"
+    printf '%s' "$rows" | sed "s/${S2}new${S2}/${S2}${C_CYAN}new${C_RESET}${S2}/; s/${S2}\(added\|ignored\)${S2}/${S2}${C_DIM}\1${C_RESET}${S2}/"
+  })
+  if (( interactive )); then
+    chosen=$(printf '%s\n' "$table" | ui_fzf 'kx sync · which clusters?' --sortable --multi --marker='✓' --header-lines=1 \
+      --prompt='filter> ' --header='tab: tick/untick · ctrl-a: all/none · enter: apply · unticked: removed and skipped from now on' \
+      --bind="load:select-all${bind}+first,ctrl-a:toggle-all" | sed 's/\x1b\[[0-9;]*m//g' | awk '{ print $2 }') || { info "Cancelled."; return 0; }
+  else
+    print_table <<<"$table" >&2
+    chosen=$(printf '%s' "$rows" | awk -F"$S2" '$6 != "ignored" { print $2 }')
+  fi
+
+  # 4. Unticked: added ones are removed (after asking), all are remembered.
+  local drop="" n_ign=0
+  while IFS=$S2 read -r alias c label _ _ status _; do
+    grep -qxF "$c" <<<"$chosen" && continue
+    case "$status" in
+      added) drop+="$alias"$'\t'"$c"$'\t'"$label"$'\n' ;;
+      new) ignore_add "$c" "cluster in $label"; n_ign=$((n_ign + 1)) ;;
+    esac
+  done <<<"${rows%$'\n'}"
+  (( n_ign )) && info "${C_DIM}$n_ign new cluster(s) skipped from now on · kx ignore shows them${C_RESET}"
+  if [[ -n "$drop" ]]; then
+    if confirm "Remove $(cut -f1 <<<"${drop%$'\n'}" | tr '\n' ' ')from $BASE_FILE (unticked)?" n; then
+      backup_base
+      while IFS=$'\t' read -r alias c label; do
+        [[ -n "$alias" ]] || continue
+        remove_ctx "$alias" && ignore_add "$c" "cluster in $label, was context $alias" && ok "removed $alias"
+      done <<<"$drop"
+    else info "Kept them."; fi
+  fi
+
+  # 5. Add + link the ticked new (or un-ignored) ones. update-kubeconfig moves
+  #    the global default, so put it back.
+  local def added=0 linkp
+  def=$(default_ctx)
+  while IFS=$S2 read -r alias c label region _ status p; do
+    grep -qxF "$c" <<<"$chosen" || continue
+    [[ "$status" == added ]] && continue
+    [[ "$status" == ignored ]] && ignore_del "$c"
+    ctx_row "$alias" >/dev/null && alias="$alias-$region"
+    [[ $added -eq 0 ]] && backup_base
+    if AWS_PROFILE="$p" aws eks update-kubeconfig --name "$c" --region "$region" --alias "$alias" \
+        --user-alias "$alias" --profile "$p" --kubeconfig "$BASE_FILE" >/dev/null 2>&1; then
+      added=$((added + 1))
+      acct=$(ctx_row "$alias" | cut -d"$S" -f8)
+      linkp=$(suggest_profile "$acct" "$alias"); [[ -n "$linkp" && "$linkp" != "$p" ]] && link_profile "$alias" "$linkp"
+      ok "added ${C_BOLD}$alias${C_RESET}  ${C_DIM}($c · $label · signs in as ${linkp:-$p})${C_RESET}"
+    else
+      warn "couldn't add $c (describe-cluster denied for $p?)"
+    fi
+  done <<<"${rows%$'\n'}"
+  [[ -n "$def" ]] && ctx_row "$def" >/dev/null && KUBECONFIG="$BASE" kubectl config use-context "$def" >/dev/null 2>&1
+  (( added )) && info "${C_DIM}Change who a cluster signs in as: kx link <context> <profile>${C_RESET}" || info "Nothing new added."
+  return 0
+}
+
+cmd_exec() {
+  [[ $# -ge 1 ]] || die "Usage: kx exec <context> -- <command...>"
+  local name="$1" row cluster user ns tmp; shift
+  [[ "${1:-}" == "--" ]] && shift
+  [[ $# -ge 1 ]] || die "Usage: kx exec <context> -- <command...>"
+  row=$(ctx_row "$name") || die "No context named '$name'."
+  IFS=$S read -r _ cluster user ns _ _ _ _ <<<"$row"
+  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/kx-exec.XXXXXX.yaml")
+  SHELL_FILE="$tmp" UI_EVAL_FILE=/dev/null write_overlay "$name" "$cluster" "$user" "$ns"
+  KUBECONFIG="$tmp:$BASE" "$@"; local rc=$?
+  rm -f "$tmp"; return $rc
+}
+
+cmd_doctor() {
+  local bad=0
+  check() { if eval "$2" >/dev/null 2>&1; then ok "$1"; else warn "$1 — $3"; bad=1; fi; }
+  check "kubectl installed" "command -v kubectl" "install kubectl"
+  check "fzf installed" "command -v fzf" "needed for the pickers"
+  check "aws CLI installed" "command -v aws" "needed for EKS auth and 'kx sync'"
+  check "okcli available" "command -v okcli" "optional: links contexts to AWS profiles"
+  check "shell hook loaded" "[[ -n \"\${KX_SHELL_FILE:-}\" ]]" "tk install bash"
+  check "base kubeconfig ($BASE_FILE)" "[[ -r \"$BASE_FILE\" ]]" "run 'kx sync <profile>'"
+  local arn unl
+  arn=$(ctx_names | grep -c '^arn:' || true)
+  unl=0
+  while IFS=$S read -r _ _ _ _ prof _ _ acct; do
+    [[ -n "$acct" ]] && { [[ -z "$prof" ]] || ! profile_exists "$prof"; } && unl=$((unl + 1))
+  done < <(ctx_rows)
+  [[ $arn -eq 0 ]] && ok "context names are short" || { warn "$arn context(s) still use ARN names — run 'kx tidy'"; bad=1; }
+  [[ $unl -eq 0 ]] && ok "EKS contexts are linked to AWS profiles" || { warn "$unl EKS context(s) not linked — run 'kx tidy'"; bad=1; }
+  is_prod "$(default_ctx)" && { warn "the global default is a PROD cluster ($(default_ctx)) — 'kx default <dev ctx>'"; bad=1; }
+  return $bad
+}
+
+cmd_help() {
+  ui_help kx "Kubernetes contexts, per terminal · v$KX_VERSION" <<EOF
+## Everyday
+kx	picker	enter: switch · alt-enter: + namespace · ctrl-d: make default
+kx <context>	switch this terminal
+kx -	back to the previous context
+kx ls	every context: namespace, who it signs in as, session
+kx status	what this terminal is using
+kx current	the context in use, name only
+kx ns [name|-]	namespace for this terminal	no name: picker · ctrl-d: make default
+kx off	stop overriding; follow the default again
+kx exec <context> -- <cmd>	one command on another context	kx exec shop-prod -- kubectl get nodes
+
+## Look around
+Lists start on this terminal's namespace · ctrl-a: every namespace · ctrl-d: make the row's namespace the default · -n <namespace>: another
+Type to filter · ctrl-p: details (right, below, off) · esc: quit
+kx pods	pods: the running copies of an app	logs · shell inside · port-forward · restart
+kx why [pod]	why a pod isn't healthy, in plain words	crashing, stuck, out of memory, no image…
+kx deploys	deployments: keep N pods running	its pods · logs of all of them · restart
+kx configs	configmaps: settings an app reads	enter shows them on the right
+kx secrets	passwords and keys	enter shows the values on the right
+kx services	a fixed address in front of pods	enter: port-forward
+kx get [kind]	anything else	ingresses, jobs, nodes… no kind: pick one
+
+## Shortcuts
+kx logs [pod]	follow a pod's logs	kx logs deploy/<name>: all its pods
+kx shell [pod]	a shell inside a pod
+kx restart [deploy]	restart a deployment, no downtime	asks first
+kx forward <pod|svc/x> [port]	reach it on localhost	kx forward svc/api 8080:80
+kx events [-A]	what the cluster did lately
+kx top [nodes]	CPU and memory use
+
+## Changes
+In a list, ctrl-e turns on change mode: edit, delete, scale (restart is always there)
+The frame turns amber (red on prod); edits show a diff first; prod asks you to type the name
+kx changes	what you changed with kx, and when
+
+## Default
+kx default [context [namespace]]	show / set what new terminals start on	kx default shop-dev flux-system
+
+## Setup
+kx sync	tick the AWS accounts and EKS clusters you want	unticked: removed and skipped next time · looks in: $REGIONS
+kx ignore [name|edit]	what kx sync skips · add a context, cluster or account	no name: the list · edit: open the file
+kx unignore <name>	let kx sync offer it again
+kx rm <context>	remove a context (kx sync offers it again)
+kx tidy	short names, each linked to an okcli profile
+kx link <context> [profile]	which AWS profile signs in to a context
+kx unlink <context>	sign in with the terminal's AWS_PROFILE
+kx rename <old> <new>	rename a context
+kx doctor	check the setup
+kx help	this page
+
+## How it works
+Switching writes a small kubeconfig for this terminal only. kubectl, helm, k9s
+and starship follow it; other terminals don't move.
+A linked context signs in with its own AWS profile, whatever the terminal's
+AWS_PROFILE is. SESSION shows when that profile's login runs out.
+Contexts count as prod unless the name contains dev / test / stg / qa / poc.
+EOF
+}
+
+# --------------------------------------------------------------- dispatch ---
+
+main() {
+  local cmd="${1:-}"
+  [[ $# -gt 0 ]] && shift
+  case "$cmd" in
+    "")              cmd_pick ;;
+    -)               cmd_prev ;;
+    ls|list)         cmd_ls ;;
+    st|status)       cmd_status ;;
+    cur|current)     cmd_current ;;
+    ns|namespace)    cmd_ns "$@" ;;
+    off)             cmd_off ;;
+    default)         cmd_default "$@" ;;
+    exec)            cmd_exec "$@" ;;
+    sync)            cmd_sync "$@" ;;
+    ignore|hide)     cmd_ignore "$@" ;;
+    unignore|unhide) cmd_unignore "$@" ;;
+    rm|remove)       cmd_rm "$@" ;;
+    tidy)            cmd_tidy "$@" ;;
+    link)            cmd_link "$@" ;;
+    unlink)          cmd_unlink "$@" ;;
+    rename)          cmd_rename "$@" ;;
+    doctor)          cmd_doctor ;;
+    help|-h|--help)  cmd_help ;;
+    pods)            cmd_pods "$@" ;;
+    logs)            cmd_logs "$@" ;;
+    why)             cmd_why "$@" ;;
+    shell)           cmd_shell "$@" ;;
+    deploys)         cmd_deploys "$@" ;;
+    restart)         cmd_restart "$@" ;;
+    configs)         cmd_configs "$@" ;;
+    secrets)         cmd_secrets "$@" ;;
+    services)        cmd_services "$@" ;;
+    forward)         cmd_forward "$@" ;;
+    events)          cmd_events "$@" ;;
+    top)             cmd_top "$@" ;;
+    get)             cmd_get "$@" ;;
+    changes)         cmd_changes ;;
+    __pane)          ui_color; COLUMNS=${FZF_PREVIEW_COLUMNS:-${COLUMNS:-}} res_pane "$@" ;;
+    __list)          ui_color; list_cb "$@" ;;
+    __forward)       printf '\e]2;kx forward\a'; forward_screen "$@" "close this tab (ctrl+w)" ;;
+    __shell)         KX_SHELL_TAB=1 shell_tab "$@" ;;
+    __logs)          KX_TAB=1 pod_logs "$@" ;;
+    __names)         ctx_names ;;
+    __ctxrows)       ui_color; context_rows ;;
+    __pickdef)       ui_color; pick_default "$@" ;;
+    __setdef)        set_default "$@" ;;
+    __nsrows)        ui_color; ns_rows ;;
+    __nsdef)         set_default_ns "$KX_NS_CTX" "$1" ;;
+    __toast)         ui_color; default_toast "$@" ;;
+    __current)       internal_current ;;
+    -*)              ui_unknown kx "$cmd" ;;
+    *)
+      if ctx_row "$cmd" >/dev/null; then do_switch "$cmd"
+      else ui_unknown kx "$cmd" context; fi
+      ;;
+  esac
+}
+
+main "$@"

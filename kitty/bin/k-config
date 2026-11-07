@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# k-config: edit the repo's kitty.conf (kitty/kitty.conf). ~/.config/kitty/kitty.conf
+# links to it (./install.sh kitty-config), so this is the file kitty reads.
+set -uo pipefail
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+KITTY_DIR="$(cd "$(dirname "$SELF")/.." && pwd)"
+# shellcheck source=../../lib/ui.sh
+. "$KITTY_DIR/../lib/ui.sh"
+
+conf="$KITTY_DIR/kitty.conf"
+live="${XDG_CONFIG_HOME:-$HOME/.config}/kitty/kitty.conf"
+
+cmd_help() {
+  ui_help k-config "kitty settings" <<'EOF'
+k-config	edit kitty.conf	$EDITOR, else nano
+k-config help	this page
+
+The file is kitty/kitty.conf in the toolkit; ~/.config/kitty/kitty.conf links to it.
+kitty reloads it by itself when you save (kitty 0.47+). Some settings, like the
+shell or remote control, only change after quitting kitty and opening it again.
+EOF
+}
+
+case "${1:-}" in
+  "")
+    if [[ "$(readlink -f "$live" 2>/dev/null)" != "$(readlink -f "$conf")" ]]; then
+      warn "kitty isn't reading this file: ${live/#$HOME/\~} isn't linked to it · fix: ./install.sh kitty-config"
+    fi
+    "${EDITOR:-nano}" "$conf"
+    info "${C_DIM}kitty picks it up by itself when you save. Not showing? Quit kitty fully and reopen it.${C_RESET}" ;;
+  help|-h|--help) cmd_help ;;
+  *) ui_unknown k-config "$1" ;;
+esac

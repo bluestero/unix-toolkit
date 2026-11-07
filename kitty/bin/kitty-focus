@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# kitty-focus: bring kitty to the front, or start it if it isn't running.
+# Ctrl+Alt+T runs this (set up by kitty/install-kitty-gnome.sh); Ctrl+Shift+Alt+T
+# still opens a new window. With several kitty windows, each press moves to the
+# next one. Focusing needs the Window Calls GNOME extension (./install.sh
+# window-calls); without it this just opens a new window.
+set -uo pipefail
+
+launch() {
+  local k
+  for k in "$HOME/.local/kitty.app/bin/kitty" x-terminal-emulator kitty; do
+    command -v "$k" >/dev/null 2>&1 && exec "$k"
+  done
+  exit 1
+}
+
+WC=(gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/Shell/Extensions/Windows)
+raw=$("${WC[@]}" --method org.gnome.Shell.Extensions.Windows.List 2>/dev/null) || launch
+
+id=$(python3 -I -c '
+import ast, json, sys
+raw = sys.argv[1].strip()
+wins = [w for w in json.loads(ast.literal_eval(raw)[0]) if w.get("wm_class") == "kitty"]
+if wins:
+    cur = next((i for i, w in enumerate(wins) if w.get("focus")), -1)
+    print(wins[(cur + 1) % len(wins)]["id"])
+' "$raw" 2>/dev/null)
+
+[[ -n $id ]] || launch
+"${WC[@]}" --method org.gnome.Shell.Extensions.Windows.Activate "$id" >/dev/null 2>&1 || launch

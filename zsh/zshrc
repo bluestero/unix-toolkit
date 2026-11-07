@@ -1,0 +1,72 @@
+# zsh setup for the work toolkit. ~/.zshrc sources this (install.sh adds the line).
+# Kept small on purpose: history, keys, completion menu, faded suggestions,
+# then the same aliases/tools bash gets (shell/init.sh).
+
+[[ -o interactive ]] || return 0
+
+# --- History: large, shared between open terminals; a leading space keeps a command out
+HISTFILE="$HOME/.zsh_history"
+HISTSIZE=50000
+SAVEHIST=50000
+setopt extended_history share_history hist_ignore_dups hist_ignore_space \
+       hist_reduce_blanks hist_verify
+setopt interactive_comments no_beep
+
+# --- Keys: same as bash (emacs style)
+bindkey -e
+# Up/Down search history by what's already typed (like ~/.inputrc does for bash)
+autoload -Uz up-line-or-beginning-search down-line-or-beginning-search
+zle -N up-line-or-beginning-search
+zle -N down-line-or-beginning-search
+bindkey '^[[A' up-line-or-beginning-search   '^[OA' up-line-or-beginning-search
+bindkey '^[[B' down-line-or-beginning-search '^[OB' down-line-or-beginning-search
+# Home / End / Delete, Ctrl+Left / Ctrl+Right jump words
+bindkey '^[[H' beginning-of-line '^[OH' beginning-of-line '^[[1~' beginning-of-line
+bindkey '^[[F' end-of-line       '^[OF' end-of-line       '^[[4~' end-of-line
+bindkey '^[[3~' delete-char
+bindkey '^[[1;5C' forward-word '^[[1;5D' backward-word
+# Ctrl+W and Alt+Backspace stop at / (delete one path part at a time)
+WORDCHARS=${WORDCHARS//\/}
+
+# --- Colors for ls and the completion menu
+if [[ -x /usr/bin/dircolors ]]; then
+  if [[ -r ~/.dircolors ]]; then eval "$(dircolors -b ~/.dircolors)"; else eval "$(dircolors -b)"; fi
+fi
+[[ -x /usr/bin/lesspipe ]] && eval "$(SHELL=/bin/sh lesspipe)"
+
+# --- Completion: Tab opens a menu you can move through with the arrow keys.
+# Case-insensitive, and - and _ count as the same (like ~/.inputrc).
+zmodload zsh/complist
+autoload -Uz compinit
+_work_zcache="${XDG_CACHE_HOME:-$HOME/.cache}/zsh"
+[[ -d $_work_zcache ]] || mkdir -p "$_work_zcache"
+compinit -d "$_work_zcache/zcompdump-$ZSH_VERSION"
+unset _work_zcache
+zstyle ':completion:*' menu select
+zstyle ':completion:*' matcher-list 'm:{[:lower:][:upper:]-_}={[:upper:][:lower:]_-}' 'r:|[._-]=* r:|=*'
+zstyle ':completion:*' list-colors "${(s.:.)LS_COLORS}"
+zstyle ':completion:*' group-name ''
+zstyle ':completion:*:descriptions' format '%F{8}%d%f'
+bindkey -M menuselect '^[[Z' reverse-menu-complete   # Shift+Tab goes back
+setopt complete_in_word always_to_end
+
+# --- Aliases, PATH, nvm, direnv, starship, okcli, kx, twin, k-icon
+_work_init="${${(%):-%x}:A:h:h}/shell/init.sh"
+[[ -r $_work_init ]] && source "$_work_init"
+unset _work_init
+
+# --- Suggestions while typing: faded text from history, no background.
+# Shift+Tab, → or End accepts it, Alt+F accepts one word. Tab stays normal completion.
+ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE='fg=8'
+ZSH_AUTOSUGGEST_STRATEGY=(history)
+if [[ -r /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh ]]; then
+  source /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh
+  # Shift+Tab: take the suggestion if one is showing, otherwise complete like Tab.
+  _work_shift_tab() {
+    if [[ -n $POSTDISPLAY ]]; then zle autosuggest-accept; else zle expand-or-complete; fi
+  }
+  zle -N _work_shift_tab
+  # left unwrapped by the plugin, so it can still see the suggestion
+  ZSH_AUTOSUGGEST_IGNORE_WIDGETS+=(_work_shift_tab)
+  bindkey '^[[Z' _work_shift_tab   # (inside the Tab menu, Shift+Tab still goes back)
+fi

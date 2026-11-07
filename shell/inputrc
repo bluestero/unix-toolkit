@@ -1,0 +1,18 @@
+$include /etc/inputrc
+
+# Case-insensitive Tab completion, treat - and _ as equal
+set completion-ignore-case on
+set completion-map-case on
+# Show all matches on first Tab instead of beeping
+set show-all-if-ambiguous on
+# Colour completions like ls; symlinked folders get a trailing /
+set colored-stats on
+set colored-completion-prefix on
+set mark-symlinked-directories on
+# Up/Down arrows search history by what you've already typed
+"\e[A": history-search-backward
+"\e[B": history-search-forward
+# Shift+Tab cycles through matches
+"\e[Z": menu-complete
+"\eOA": history-search-backward
+"\eOB": history-search-forward

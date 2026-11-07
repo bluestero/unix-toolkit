@@ -1,0 +1,1295 @@
+# What install.sh / uninstall.sh manage. Sourced after lib/setup.sh.
+#
+# Each component <id> has:
+#   label_<id>       short name (summary at the end)
+#   title_<id>       one line in plain words: what you get
+#   detail_<id>      what it touches on disk (shown with --details)
+#   state_<id>       sets STATE (installed | partial | missing | n/a) and NOTE
+#   install_<id>     brings it to "installed"; does nothing if already there
+#   uninstall_<id>   puts things back; does nothing if already gone
+# (<id> with - replaced by _ in function names)
+# Whether this machine can run a component at all (GNOME? apt? Linux?) is checked
+# first, from requires_of below; state_<id> only covers what's left (n/a there =
+# a dependency such as kitty isn't installed yet).
+
+# shellcheck source=platform.sh
+. "$repo/lib/platform.sh"
+
+COMPONENTS=(bash keys commands starship fzf kitty kitty-config kitty-bg kitty-theme kitty-accents kitty-icons kitty-nautilus kitty-centered zsh login-shell btop yazi window-calls alt-tab-desktop dash2dock dash-to-panel hide-docker-tray app-keys no-animations vitals-icons rofi eks-clusters repos claude-skill claude-hook)
+# Shown in groups in the checklist; the rest are optional extras.
+RECOMMENDED=(bash keys commands starship fzf)
+KITTY_PARTS=(kitty kitty-config kitty-bg kitty-theme kitty-accents kitty-icons kitty-nautilus kitty-centered)
+DESKTOP_PARTS=(window-calls alt-tab-desktop dash2dock dash-to-panel hide-docker-tray app-keys no-animations vitals-icons rofi)
+WORKSPACE_PARTS=(repos)
+CLAUDE_PARTS=(claude-skill claude-hook)
+CLOUD_PARTS=(eks-clusters)
+group_of() {
+  # a layer's component names its own group (group_<id>)
+  if declare -F "$(fn group "$1")" >/dev/null; then "$(fn group "$1")"
+  elif [[ " ${RECOMMENDED[*]} " == *" $1 "* ]]; then echo Recommended
+  elif [[ " ${KITTY_PARTS[*]} " == *" $1 "* ]]; then echo Kitty
+  elif [[ " ${DESKTOP_PARTS[*]} " == *" $1 "* ]]; then echo "Desktop (GNOME)"
+  elif [[ " ${CLOUD_PARTS[*]} " == *" $1 "* ]]; then echo Cloud
+  elif [[ " ${WORKSPACE_PARTS[*]} " == *" $1 "* ]]; then echo Workspaces
+  elif [[ " ${CLAUDE_PARTS[*]} " == *" $1 "* ]]; then echo "Claude Code"
+  else echo Optional; fi
+}
+
+# What a component needs from the machine itself (see lib/platform.sh). Anything
+# not listed works wherever bash does. A component whose needs aren't met gets
+# the state "unsupported" with the reason, and is left out of the setup list.
+#   linux  Linux-only download or tool        gnome  GNOME session (gsettings, extensions)
+#   apt    installs packages with apt
+requires_of() {
+  case "$1" in
+    fzf|kitty|login-shell|yazi)            echo "linux" ;;
+    zsh|btop|kitty-bg|kitty-icons)         echo "apt" ;;
+    kitty-nautilus|rofi)                   echo "gnome apt" ;;
+    kitty-centered|window-calls|alt-tab-desktop|dash2dock|dash-to-panel|hide-docker-tray|app-keys|no-animations|vitals-icons) echo "gnome" ;;
+  esac
+}
+# component_unsupported <id>: the reason this machine can't run it; nothing when it can.
+component_unsupported() {
+  local need why
+  for need in $(requires_of "$1"); do
+    why=$(unmet_requirement "$need"); [[ -n $why ]] && { echo "$why"; return 0; }
+  done
+  return 0
+}
+# component_state <id>: sets STATE and NOTE (unsupported here, else the component's own check)
+component_state() {
+  local why; why=$(component_unsupported "$1")
+  if [[ -n $why ]]; then STATE=unsupported NOTE=$why; else "$(fn state "$1")"; fi
+}
+
+fn() { printf '%s_%s' "$1" "${2//-/_}"; }
+ver_lt() { [[ "$1" != "$2" && "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" == "$1" ]]; }
+
+init_line="[ -f \"$repo/shell/init.sh\" ] && . \"$repo/shell/init.sh\"  # work toolkit (okcli, kx, twin, ctx)"
+init_re='^\[ -f "[^"]*/shell/init\.sh" \] && \. "[^"]*/shell/init\.sh".*# work toolkit'
+
+# ---------------------------------------------------------------- bash ---
+rc="$HOME/.bashrc"
+label_bash() { echo "Bash setup"; }
+title_bash() { echo "Your work aliases and tools in every bash terminal"; }
+detail_bash() { echo "~/.bashrc loads the toolkit with one line; old copies and clashing leftovers removed"; }
+bash_plan() {
+  BASH_PLAN=$(mktemp)
+  python3 -I "$repo/lib/bashrc_plan.py" "$rc" "$init_line" >"$BASH_PLAN"
+}
+state_bash() {
+  NOTE=""
+  [[ -f "$rc" ]] || { STATE=missing; NOTE="no ~/.bashrc"; return; }
+  bash_plan
+  if cmp -s "$rc" "$BASH_PLAN"; then STATE=installed
+  elif grep -qE "$init_re" "$rc"; then STATE=partial; NOTE="leftovers to clean up in ~/.bashrc"
+  else STATE=missing; fi
+  rm -f "$BASH_PLAN"
+}
+install_bash() {
+  local b missing v
+  [[ -f "$rc" ]] || touch "$rc"
+  bash_plan
+  if cmp -s "$rc" "$BASH_PLAN"; then rm -f "$BASH_PLAN"; ok "already done"; return; fi
+  say "      ${D}$(diff "$rc" "$BASH_PLAN" | grep -c '^<') lines move out of ~/.bashrc (into shell/common.sh and the tools), $(diff "$rc" "$BASH_PLAN" | grep -c '^>') added${R}"
+  logf "--- ~/.bashrc diff ---"
+  diff -u "$rc" "$BASH_PLAN" --label "~/.bashrc" --label "~/.bashrc (new)" >>"$log_file"
+  (( details )) && diff -u "$rc" "$BASH_PLAN" --label "~/.bashrc" --label "~/.bashrc (new)" | sed 's/^/    /'
+  missing=""
+  for v in $(grep -oE '^export OKTA_AWSCLI_[A-Z_]+' "$rc" | sed 's/^export //'); do
+    cat "$repo/okta/shell/okta-env.sh" "$repo"/layers/*/shell/init.sh 2>/dev/null | grep -q "^export $v=" || missing+="$v "
+  done
+  [[ -n "$missing" ]] && warn "not in okta/shell/okta-env.sh or a layer yet, so they'd be lost: $missing"
+  grep -qE '^[[:space:]]*alias okcli=' "$rc" && warn "an active 'alias okcli=' stays in ~/.bashrc; it would shadow okcli"
+  if ask "Update ~/.bashrc?"; then
+    b=$(backup "$rc")
+    cat "$BASH_PLAN" >"$rc"
+    if bash -n "$rc"; then ok "done (backup: ${b/#$HOME/\~})"
+    else cp -p "$b" "$rc"; fail "syntax error in the result, so the original was put back"; fi
+  else skip "--details shows the diff"; fi
+  rm -f "$BASH_PLAN"
+}
+# Undo: the lines the toolkit took out of your original ~/.bashrc go back where
+# they were (lib/bashrc_restore.py), and anything you edited since is kept.
+uninstall_bash() {
+  local b orig base merged n
+  grep -qE "$init_re" "$rc" 2>/dev/null || { ok "not loaded from ~/.bashrc"; return; }
+  orig=$(original_of "$rc")
+  merged=$(mktemp); base=$(mktemp)
+  if [[ -n "$orig" ]] && ! grep -qE "$init_re" "$orig" &&
+     python3 -I "$repo/lib/bashrc_plan.py" "$orig" "$init_line" | grep -vE "$init_re" >"$base" &&
+     python3 -I "$repo/lib/bashrc_restore.py" <(grep -vE "$init_re" "$rc") "$orig" "$base" >"$merged"; then
+    n=$(diff "$rc" "$merged" | grep -c '^>')
+    logf "--- ~/.bashrc restore diff ---"; diff -u "$rc" "$merged" --label "~/.bashrc" --label "~/.bashrc (restored)" >>"$log_file"
+    if (( n )) && ask "Put back the $n line(s) the toolkit took out of ~/.bashrc? (your edits since are kept; no = only remove the toolkit line)"; then
+      b=$(backup "$rc"); cat "$merged" >"$rc"
+      if bash -n "$rc"; then ok "removed the toolkit line and put back your $n line(s) (backup: ${b/#$HOME/\~})"
+      else cp -p "$b" "$rc"; fail "syntax error after putting them back, so ~/.bashrc is unchanged; your original: ${orig/#$HOME/\~}"; fi
+      rm -f "$merged" "$base"; return
+    fi
+  elif [[ -n "$orig" ]]; then
+    warn "couldn't work out what to put back; your pre-toolkit ~/.bashrc: ${orig/#$HOME/\~}"
+  fi
+  rm -f "$merged" "$base"
+  b=$(backup "$rc")
+  local tmp; tmp=$(mktemp)
+  grep -vE "$init_re" "$rc" | cat -s >"$tmp"; cat "$tmp" >"$rc"; rm -f "$tmp"
+  ok "removed the toolkit line (backup: ${b/#$HOME/\~})"
+  warn "bash no longer gets the toolkit's aliases, Okta settings, nvm, direnv or starship."
+}
+
+# ---------------------------------------------------------------- keys ---
+inputrc_src="$repo/shell/inputrc"
+label_keys() { echo "Tab & history keys"; }
+title_keys() { echo "Smarter Tab completion; ↑/↓ searches history by what you typed"; }
+detail_keys() { echo "~/.inputrc for bash (case-insensitive Tab, Up/Down search by what's typed)"; }
+state_keys() { NOTE=""; if linked "$HOME/.inputrc" "$inputrc_src"; then STATE=installed; else STATE=missing; fi; }
+install_keys() { linked "$HOME/.inputrc" "$inputrc_src" && { ok "already linked"; return; }
+  ask "Link ~/.inputrc to shell/inputrc?" && link_file "$HOME/.inputrc" "$inputrc_src" || skip; }
+uninstall_keys() { unlink_file "$HOME/.inputrc" "$inputrc_src"; }
+
+# ------------------------------------------------------------ commands ---
+cmd_bins=(okta/bin/okcli kube/bin/kx twingate/bin/twin bin/ctx bin/tk ws/bin/ws)
+label_commands() { echo "Toolkit commands"; }
+title_commands() { echo "tk, okcli, kx, twin, ctx and ws, usable from anywhere"; }
+detail_commands() { echo "tk, okcli, kx, twin, ctx, ws in ~/.local/bin (for scripts and other programs)"; }
+state_commands() {
+  local b n=0
+  for b in "${cmd_bins[@]}"; do linked "$HOME/.local/bin/${b##*/}" "$repo/$b" && (( n++ )); done
+  NOTE=""
+  if (( n == ${#cmd_bins[@]} )); then STATE=installed
+  elif (( n )); then STATE=partial; NOTE="$n of ${#cmd_bins[@]} linked"
+  else STATE=missing; fi
+}
+install_commands() {
+  local b name
+  for b in "${cmd_bins[@]}"; do
+    name=${b##*/}
+    linked "$HOME/.local/bin/$name" "$repo/$b" && continue
+    chmod +x "$repo/$b"
+    if ask "Add the ${B}$name${R} command?"; then link_file "$HOME/.local/bin/$name" "$repo/$b"; else skip; fi
+  done
+  case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) warn "~/.local/bin is not on your PATH" ;; esac
+}
+uninstall_commands() {
+  local b
+  for b in "${cmd_bins[@]}"; do
+    linked "$HOME/.local/bin/${b##*/}" "$repo/$b" && rm -f "$HOME/.local/bin/${b##*/}" && ok "removed ${b##*/}"
+  done
+  return 0
+}
+
+# ------------------------------------------------------------ starship ---
+ss="$HOME/.config/starship.toml"; ss_src="$repo/starship/starship.toml"
+label_starship() { echo "Starship prompt"; }
+title_starship() { echo "Prompt showing git branch, k8s cluster, AWS profile and PROD warnings"; }
+detail_starship() { echo "prompt config (git, python, k8s, AWS profile + expiry, PROD markers)"; }
+state_starship() { NOTE=""; if linked "$ss" "$ss_src"; then STATE=installed; else STATE=missing; fi
+  command -v starship >/dev/null || NOTE="starship itself isn't installed"; }
+install_starship() { linked "$ss" "$ss_src" && { ok "already linked"; return; }
+  ask "Switch to the toolkit's starship prompt?" && link_file "$ss" "$ss_src" || skip; }
+uninstall_starship() { unlink_file "$ss" "$ss_src"; }
+
+# ----------------------------------------------------------------- fzf ---
+# Every toolkit picker runs on fzf. A current release in ~/.local/bin (ahead of
+# apt's on PATH) gives the lists a position counter and k-theme its tabs.
+fzf_mine="$HOME/.local/bin/fzf"
+fzf_ver() { "${1:-fzf}" --version 2>/dev/null | awk '{print $1}'; }
+label_fzf() { echo "fzf (current)"; }
+title_fzf() { echo "Newer fzf for every picker: shows where you are (12/426), k-theme's tabs"; }
+detail_fzf() { echo "fzf $FZF_VERSION from GitHub (checksum-checked) in ~/.local/bin; apt's fzf, if any, stays as the fallback"; }
+state_fzf() {
+  local v; v=$(fzf_ver); NOTE=""
+  if [[ -z "$v" ]]; then STATE=missing
+  elif ver_lt "$v" "$FZF_MIN"; then STATE=partial; NOTE="now: $v (too old for the counter and k-theme tabs)"
+  elif [[ -x "$fzf_mine" ]] && ver_lt "$(fzf_ver "$fzf_mine")" "$FZF_VERSION"; then STATE=partial; NOTE="update: $(fzf_ver "$fzf_mine") → $FZF_VERSION"
+  else STATE=installed; NOTE="$v"; fi
+}
+install_fzf() {
+  local v; v=$(fzf_ver "$fzf_mine")
+  if [[ -n "$v" ]] && ! ver_lt "$v" "$FZF_VERSION"; then ok "fzf $v"; return; fi
+  if ask "Download fzf $FZF_VERSION into ~/.local/bin? (about 2 MB, no sudo)"; then
+    dry && return
+    fetch_fzf && ok "fzf $(fzf_ver "$fzf_mine")" || fail "not installed (see the log)"
+  else skip; fi
+  case "$(command -v fzf)" in "$fzf_mine"|"") ;; *) warn "$(command -v fzf) comes first on PATH; open a new terminal" ;; esac
+}
+uninstall_fzf() {
+  [[ -e "$fzf_mine" ]] || { ok "not installed"; return 0; }
+  rm -f "$fzf_mine"
+  if command -v fzf >/dev/null; then ok "removed; back to $(command -v fzf) $(fzf_ver)"
+  else ok "removed (no other fzf: pickers fall back to plain lists)"; fi
+}
+
+# --------------------------------------------------------------- kitty ---
+# The official kitty build in ~/.local/kitty.app (no sudo). Ubuntu's apt kitty
+# stays installed as a fallback; uninstalling this goes back to it.
+kapp="$HOME/.local/kitty.app"
+kapp_bin="$kapp/bin/kitty"
+kitty_desktop="$HOME/.local/share/applications/kitty.desktop"
+kapp_ver() { [[ -x "$kapp_bin" ]] && "$kapp_bin" --version 2>/dev/null | awk '{print $2}'; }
+kapp_arch() { case "$(uname -m)" in x86_64|amd64) echo x86_64 ;; aarch64|arm64) echo arm64 ;; esac; }
+# Newest release from GitHub: sets KL_VER KL_URL KL_SHA (empty when offline). Asked once per run.
+kitty_latest_info() {
+  [[ -n "${KL_DONE:-}" ]] && return
+  KL_DONE=1 KL_VER="" KL_URL="" KL_SHA=""
+  local out
+  out=$(curl -fsS -m 6 https://api.github.com/repos/kovidgoyal/kitty/releases/latest 2>/dev/null |
+    python3 -Ic '
+import json, sys
+r = json.load(sys.stdin); arch = sys.argv[1]; ver = r["tag_name"].lstrip("v")
+for a in r["assets"]:
+    if a["name"] == f"kitty-{ver}-{arch}.txz" and a.get("digest", "").startswith("sha256:"):
+        print(ver, a["browser_download_url"], a["digest"][7:])
+' "$(kapp_arch)" 2>/dev/null) || return 0
+  read -r KL_VER KL_URL KL_SHA <<<"$out"
+}
+kapp_desktop_ok() { grep -q "^Exec=$kapp_bin" "$kitty_desktop" 2>/dev/null; }
+term_alt() { update-alternatives --query x-terminal-emulator 2>/dev/null | sed -n 's/^Value: //p'; }
+
+label_kitty() { echo "Kitty (latest)"; }
+title_kitty() { echo "The kitty terminal itself, latest release (Ubuntu's is years old)"; }
+detail_kitty() { echo "official build in ~/.local/kitty.app, kitty/kitten in ~/.local/bin, app menu entry; apt kitty kept as a fallback"; }
+state_kitty() {
+  NOTE=""
+  [[ -n "$(kapp_arch)" ]] || { STATE=n/a; NOTE="no build for $(uname -m)"; return; }
+  local v; v=$(kapp_ver)
+  if [[ -z "$v" ]]; then
+    STATE=missing
+    command -v kitty >/dev/null && NOTE="now: $(kitty --version 2>/dev/null | awk '{print $2}') (apt)"
+    return
+  fi
+  kitty_latest_info
+  if ! linked "$HOME/.local/bin/kitty" "$kapp_bin" || ! kapp_desktop_ok; then STATE=partial; NOTE="$v, not hooked up everywhere"
+  elif [[ -n "$KL_VER" ]] && ver_lt "$v" "$KL_VER"; then STATE=partial; NOTE="update: $v → $KL_VER"
+  else STATE=installed; NOTE="$v"; fi
+}
+install_kitty() {
+  local v tmp sum
+  v=$(kapp_ver); kitty_latest_info
+  if [[ -z "$v" ]] || { [[ -n "$KL_VER" ]] && ver_lt "$v" "$KL_VER"; }; then
+    [[ -n "$KL_VER" ]] || { fail "couldn't reach GitHub to find the latest kitty (offline?)"; return 1; }
+    if ask "Download kitty $KL_VER${v:+ (you have $v)} into ~/.local/kitty.app? (about 40 MB, no sudo)"; then
+      tmp=$(mktemp -d)
+      if ! curl -fsSL --retry 2 -o "$tmp/kitty.txz" "$KL_URL" 2>>"$log_file"; then
+        rm -rf "$tmp"; fail "download failed (see the log)"; return 1
+      fi
+      sum=$(sha256sum "$tmp/kitty.txz" | cut -d' ' -f1)
+      [[ "$sum" == "$KL_SHA" ]] || { rm -rf "$tmp"; fail "download didn't match GitHub's checksum, so nothing was installed"; return 1; }
+      mkdir -p "$tmp/app" && tar xJf "$tmp/kitty.txz" -C "$tmp/app" 2>>"$log_file" &&
+        "$tmp/app/bin/kitty" --version >/dev/null 2>&1 || { rm -rf "$tmp"; fail "the download doesn't run on this machine"; return 1; }
+      rm -rf "$kapp.old"; [[ -d "$kapp" ]] && mv "$kapp" "$kapp.old"
+      mkdir -p "$(dirname "$kapp")" && mv "$tmp/app" "$kapp" && rm -rf "$kapp.old" "$tmp"
+      logf "  kitty $KL_VER from $KL_URL (sha256 $KL_SHA)"
+      ok "kitty $KL_VER installed (checksum verified)"
+    else skip; return 0; fi
+  else ok "kitty $v is the latest"; fi
+
+  if ! linked "$HOME/.local/bin/kitty" "$kapp_bin" || ! linked "$HOME/.local/bin/kitten" "$kapp/bin/kitten"; then
+    if ask "Use it for the ${B}kitty${R} and ${B}kitten${R} commands? (links in ~/.local/bin)"; then
+      link_file "$HOME/.local/bin/kitty" "$kapp_bin"
+      link_file "$HOME/.local/bin/kitten" "$kapp/bin/kitten"
+    else skip; fi
+  fi
+
+  # The app menu / dock entry. A user copy may already exist (kitty-icons keeps the
+  # icon you picked there); only its Exec lines change.
+  if ! kapp_desktop_ok && ask "Open the new kitty from the app menu and dock?"; then
+    mkdir -p "$(dirname "$kitty_desktop")"
+    if [[ ! -f "$kitty_desktop" ]]; then
+      cp "$kapp/share/applications/kitty.desktop" "$kitty_desktop"
+      sed -i "s|^Icon=kitty$|Icon=$kapp/share/icons/hicolor/256x256/apps/kitty.png|" "$kitty_desktop"
+    fi
+    sed -i -E "s#^(Try)?Exec=kitty( |$)#\1Exec=$kapp_bin\2#" "$kitty_desktop"
+    command -v update-desktop-database >/dev/null && update-desktop-database "$(dirname "$kitty_desktop")" 2>/dev/null
+    kapp_desktop_ok && ok "done" || fail "couldn't update $kitty_desktop"
+  fi
+
+  # Ctrl+Alt+T and Files' "Open in Terminal" (set up by kitty-nautilus) use this.
+  if [[ "$(term_alt)" == /usr/bin/kitty ]] &&
+     ask "Make Ctrl+Alt+T and \"Open in Terminal\" use the new kitty too? (needs sudo)"; then
+    as_root update-alternatives --install /usr/bin/x-terminal-emulator x-terminal-emulator "$kapp_bin" 30 >>"$log_file" 2>&1 &&
+      as_root update-alternatives --set x-terminal-emulator "$kapp_bin" >>"$log_file" 2>&1 && ok "done" || fail "update-alternatives failed (see the log)"
+  fi
+  warn "quit kitty fully (every window) and reopen it to start the new version"
+}
+uninstall_kitty() {
+  [[ -d "$kapp" ]] || { ok "not installed"; return 0; }
+  if [[ "$(term_alt)" == "$kapp_bin" ]]; then
+    if [[ -x /usr/bin/kitty ]]; then as_root update-alternatives --set x-terminal-emulator /usr/bin/kitty >>"$log_file" 2>&1
+    else as_root update-alternatives --auto x-terminal-emulator >>"$log_file" 2>&1; fi
+  fi
+  as_root update-alternatives --remove x-terminal-emulator "$kapp_bin" >>"$log_file" 2>&1 || true
+  if [[ -f "$kitty_desktop" ]]; then
+    sed -i -E "s#^(Try)?Exec=$kapp_bin#\1Exec=kitty#" "$kitty_desktop"
+    command -v update-desktop-database >/dev/null && update-desktop-database "$(dirname "$kitty_desktop")" 2>/dev/null
+  fi
+  unlink_file "$HOME/.local/bin/kitty" "$kapp_bin"
+  unlink_file "$HOME/.local/bin/kitten" "$kapp/bin/kitten"
+  rm -rf "$kapp"
+  if [[ -x /usr/bin/kitty ]]; then ok "removed; back to apt's kitty $(/usr/bin/kitty --version | awk '{print $2}') (quit and reopen kitty)"
+  else warn "removed, and there's no apt kitty: install one with: sudo apt install kitty"; fi
+}
+
+# -------------------------------------------------------- kitty-config ---
+kc="$HOME/.config/kitty/kitty.conf"; kc_src="$repo/kitty/kitty.conf"
+label_kitty_config() { echo "Kitty settings"; }
+title_kitty_config() { echo "Use the toolkit's kitty terminal settings"; }
+detail_kitty_config() { echo "~/.config/kitty/kitty.conf from kitty/kitty.conf"; }
+state_kitty_config() { NOTE=""
+  command -v kitty >/dev/null || { STATE=n/a; NOTE="kitty isn't installed"; return; }
+  if linked "$kc" "$kc_src"; then STATE=installed; else STATE=missing; fi; }
+install_kitty_config() { linked "$kc" "$kc_src" && { ok "already linked"; return; }
+  if [[ -f "$kc" && ! -L "$kc" ]] && ! cmp -s "$kc" "$kc_src"; then
+    warn "your current kitty.conf differs from kitty/kitty.conf (it's kept as a backup)"
+    (( details )) && diff -u "$kc" "$kc_src" | sed 's/^/    /'
+  fi
+  ask "Link kitty.conf to the repo copy?" && link_file "$kc" "$kc_src" || skip; }
+uninstall_kitty_config() {
+  linked "$kc" "$kc_src" || return 0
+  rm -f "$kc"
+  local b; b=$(latest_backup "$kc")
+  if [[ -n "$b" ]]; then mv "$b" "$kc"; ok "unlinked, put back ${b/#$HOME/\~}"
+  else cp "$kc_src" "$kc"; ok "unlinked (left a plain copy so kitty keeps its settings)"; fi
+}
+
+# ------------------------------------------------------------ kitty-bg ---
+# k-bg itself comes with the toolkit (kitty/bin); this sets up what it needs and
+# the first pick. Its state is ~/.config/kitty/background.conf ("none" counts).
+kbg_conf="$HOME/.config/kitty/background.conf"
+kbg_pkgs=(imagemagick)
+label_kitty_bg() { echo "Kitty backgrounds"; }
+title_kitty_bg() { echo "Background images with live preview, brightness and opacity (k-bg)"; }
+detail_kitty_bg() { echo "imagemagick (apt) to resize images, fzf for the picker; your pick in ~/.config/kitty/background.conf"; }
+state_kitty_bg() { NOTE=""
+  command -v kitty >/dev/null || { STATE=n/a; NOTE="kitty isn't installed"; return; }
+  linked "$kc" "$kc_src" || { STATE=n/a; NOTE="needs kitty-config first"; return; }
+  local missing; missing=$(missing_pkgs "${kbg_pkgs[@]}")
+  command -v fzf >/dev/null || missing+="fzf "
+  if [[ -z "$missing" && -f "$kbg_conf" ]]; then STATE=installed; NOTE="$("$kbg" current 2>/dev/null)"
+  elif [[ -n "$missing" && ! -f "$kbg_conf" ]]; then STATE=missing
+  else STATE=partial; NOTE="${missing:+needs: $missing}"; [[ -f "$kbg_conf" ]] || NOTE="no background picked yet"; fi; }
+install_kitty_bg() {
+  linked "$kc" "$kc_src" || { skip "needs kitty-config first"; return; }
+  local missing; missing=$(missing_pkgs "${kbg_pkgs[@]}")
+  if [[ -n "$missing" ]]; then
+    if ask "Install $missing(apt, needs sudo; it resizes the images)?"; then
+      dry || apt_install "${kbg_pkgs[@]}" && ok "installed" || { fail "apt failed (see $log_file)"; return 1; }
+    else skip; return 0; fi
+  fi
+  command -v fzf >/dev/null || install_fzf
+  [[ -f "$kbg_conf" ]] && { ok "background: $("$kbg" current 2>/dev/null) ${D}(k-bg to change)${R}"; return; }
+  dry && { say "      ${D}would open the k-bg picker${R}"; return; }
+  if [[ $mode == ask && -t 1 ]] && ask "Pick a background now? (↑/↓ previews it live; esc = none for now)"; then
+    "$kbg" </dev/tty >/dev/tty 2>&1
+  fi
+  [[ -f "$kbg_conf" ]] || "$kbg" off >>"$log_file" 2>&1
+  ok "background: $("$kbg" current 2>/dev/null) ${D}(k-bg any time)${R}"
+}
+uninstall_kitty_bg() {
+  [[ -f "$kbg_conf" ]] || { ok "nothing set"; return 0; }
+  [[ "$("$kbg" __accents_state 2>/dev/null)" == on ]] && uninstall_kitty_accents
+  "$kbg" off >>"$log_file" 2>&1
+  rm -f "$kbg_conf"
+  rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/k-bg" "${XDG_STATE_HOME:-$HOME/.local/state}/k-bg"
+  ok "background off, picks and resized copies removed ${D}(fzf and imagemagick stay installed)${R}"
+}
+
+# ---------------------------------------------------------------- btop ---
+# btop with the toolkit's settings (no black panel, rounded boxes). Its colours are
+# generated from the kitty theme in use (k-theme writes ~/.config/btop/themes/kitty.theme).
+bt="$HOME/.config/btop/btop.conf"; bt_src="$repo/btop/btop.conf"
+label_btop() { echo "btop"; }
+title_btop() { echo "btop system monitor, set up to follow your kitty colour theme"; }
+detail_btop() { echo "btop (apt) if missing; ~/.config/btop/btop.conf -> btop/btop.conf; kitty.theme written by k-theme"; }
+state_btop() { NOTE=""
+  local n=0
+  command -v btop >/dev/null && (( n++ ))
+  linked "$bt" "$bt_src" && (( n++ ))
+  if (( n == 2 )); then STATE=installed; elif (( n )); then STATE=partial; else STATE=missing; fi; }
+install_btop() {
+  if ! command -v btop >/dev/null; then
+    if ask "Install btop? (apt, needs sudo)"; then
+      apt_install btop && ok "installed" || { fail "apt failed (see $log_file)"; return 1; }
+    else skip; return 0; fi
+  fi
+  if ! linked "$bt" "$bt_src"; then
+    ask "Use the toolkit's btop settings? (your own are kept as a backup)" && link_file "$bt" "$bt_src" || { skip; return 0; }
+  else ok "btop settings already linked"; fi
+  dry || "$kth" btop >>"$log_file" 2>&1 && ok "colours follow k-theme ${D}(theme: $("$kth" current 2>/dev/null))${R}"
+}
+uninstall_btop() {
+  rm -f "$HOME/.config/btop/themes/kitty.theme"
+  unlink_file "$bt" "$bt_src"
+  if command -v btop >/dev/null && ask "Also remove the btop package? (apt, needs sudo)" n; then
+    as_root apt-get remove -y btop >>"$log_file" 2>&1 && ok "package removed" || fail "apt failed (see $log_file)"
+  fi
+}
+
+# ---------------------------------------------------------------- yazi ---
+# Terminal file manager (yazi) plus the `y` command (yazi/shell/y.sh) that leaves
+# your shell in the folder you quit in. Colours come from the terminal's own
+# palette, so it already follows the kitty theme.
+yazi_mine="$HOME/.local/bin/yazi"
+yazi_ver() { "${1:-yazi}" --version 2>/dev/null | awk '/Version:/ { print $2; exit }'; }
+label_yazi() { echo "yazi"; }
+title_yazi() { echo "yazi file manager; y opens it and cd's to where you quit"; }
+detail_yazi() { echo "yazi $YAZI_VERSION from GitHub (sha256-checked) in ~/.local/bin; the y command comes with the toolkit's shell setup"; }
+state_yazi() {
+  local v; v=$(yazi_ver); NOTE=""
+  if [[ -z "$v" ]]; then STATE=missing
+  elif [[ -x "$yazi_mine" ]] && ver_lt "$(yazi_ver "$yazi_mine")" "$YAZI_VERSION"; then STATE=partial; NOTE="update: $(yazi_ver "$yazi_mine") → $YAZI_VERSION"
+  else STATE=installed; NOTE="$v"; fi
+}
+install_yazi() {
+  local v; v=$(yazi_ver "$yazi_mine")
+  if [[ -n "$v" ]] && ! ver_lt "$v" "$YAZI_VERSION"; then ok "yazi $v"; return; fi
+  if [[ -z "$v" ]] && command -v yazi >/dev/null; then ok "yazi $(yazi_ver) is already installed elsewhere"; return; fi
+  if ask "Download yazi $YAZI_VERSION into ~/.local/bin? (about 10 MB, no sudo)"; then
+    dry && return
+    fetch_yazi && ok "yazi $(yazi_ver "$yazi_mine") ${D}(type y; q quits, Q quits without cd)${R}" || fail "not installed (see the log)"
+  else skip; fi
+}
+uninstall_yazi() {
+  [[ -e "$yazi_mine" ]] || { ok "not installed"; return 0; }
+  rm -f "$yazi_mine" "$HOME/.local/bin/ya"
+  ok "removed ${D}(your ~/.config/yazi stays)${R}"
+}
+
+# --------------------------------------------------------- kitty-theme ---
+# k-theme comes with the toolkit; this downloads kitty's theme collection and
+# offers a first pick. Your own themes go in kitty/themes (k-theme add).
+kth="$repo/kitty/bin/k-theme"
+kth_conf="$HOME/.config/kitty/theme.conf"
+kth_data="${XDG_DATA_HOME:-$HOME/.local/share}/k-theme"
+label_kitty_theme() { echo "Kitty themes"; }
+title_kitty_theme() { echo "Colour themes with live preview, yours plus kitty's 400+ (k-theme)"; }
+detail_kitty_theme() { echo "kitty's theme collection into ${kth_data/#$HOME/\~} (about 0.6 MB); fzf $FZF_MIN+ for the picker; your list in ~/.config/k-theme/mine"; }
+state_kitty_theme() { NOTE=""
+  command -v kitty >/dev/null || { STATE=n/a; NOTE="kitty isn't installed"; return; }
+  linked "$kc" "$kc_src" || { STATE=n/a; NOTE="needs kitty-config first"; return; }
+  local n=0
+  local v; v=$(fzf_ver)
+  [[ -n "$v" ]] && ! ver_lt "$v" "$FZF_MIN" && (( n++ ))
+  [[ -s "$kth_data/kitty/index.tsv" ]] && (( n++ ))
+  if (( n == 2 )); then STATE=installed; NOTE="$("$kth" current 2>/dev/null)"
+  elif (( n )); then STATE=partial; [[ -n "$v" ]] && ver_lt "$v" "$FZF_MIN" && NOTE="fzf $v: no Mine / All tabs (needs $FZF_MIN+)"
+  else STATE=missing; fi; }
+install_kitty_theme() {
+  linked "$kc" "$kc_src" || { skip "needs kitty-config first"; return; }
+  local v; v=$(fzf_ver)
+  [[ -n "$v" ]] && ! ver_lt "$v" "$FZF_MIN" || install_fzf   # the tabs need a current fzf
+  if [[ ! -s "$kth_data/kitty/index.tsv" ]]; then
+    if "$kth" __ready 2>/dev/null; then ok "kitty's collection: $(grep -c . "$kth_data/kitty/index.tsv") themes"
+    elif ask "Download kitty's theme collection? (about 0.6 MB from GitHub)"; then
+      dry || "$kth" update >>"$log_file" 2>&1 && ok "$(grep -c . "$kth_data/kitty/index.tsv" 2>/dev/null) themes" ||
+        { fail "download failed (offline?); later: k-theme update"; return 1; }
+    else skip "your own themes in kitty/themes still work"; fi
+  fi
+  [[ -f "$kth_conf" ]] && { ok "theme: $("$kth" current) ${D}(k-theme to change)${R}"; return; }
+  dry && return
+  if [[ $mode == ask && -t 1 ]] && ask "Pick a colour theme now? (↑/↓ previews it live; esc keeps kitty's colours)" n; then
+    "$kth" </dev/tty >/dev/tty 2>&1
+  fi
+  ok "theme: $("$kth" current) ${D}(k-theme any time)${R}"
+}
+uninstall_kitty_theme() {
+  [[ -f "$kth_conf" || -d "$kth_data" ]] || { ok "nothing set"; return 0; }
+  [[ -f "$kth_conf" ]] && "$kth" default >>"$log_file" 2>&1
+  rm -rf "$kth_data"
+  ok "back to kitty's colours; downloaded collection removed ${D}(your themes in kitty/themes stay)${R}"
+}
+
+# ------------------------------------------------------- kitty-accents ---
+kbg="$repo/kitty/bin/k-bg"
+label_kitty_accents() { echo "Kitty accents"; }
+title_kitty_accents() { echo "Prompt, pickers, cursor and selection take a colour from the background"; }
+detail_kitty_accents() { echo "k-bg accents on: colour lines in ~/.config/kitty/background.conf (terminal colours unchanged)"; }
+state_kitty_accents() { NOTE=""
+  command -v kitty >/dev/null || { STATE=n/a; NOTE="kitty isn't installed"; return; }
+  linked "$kc" "$kc_src" || { STATE=n/a; NOTE="needs kitty-config first"; return; }
+  if [[ "$("$kbg" __accents_state 2>/dev/null)" == on ]]; then STATE=installed; else STATE=missing; fi; }
+install_kitty_accents() {
+  [[ "$("$kbg" __accents_state 2>/dev/null)" == on ]] && { ok "already on"; return; }
+  linked "$kc" "$kc_src" || { skip "needs kitty-config first"; return; }
+  if ask "Tint kitty's accents to match each background?"; then
+    logf "  $("$kbg" accents on 2>&1)"
+    ok "on (restart kitty once if it doesn't show yet; ${C}k-bg accents off${R} undoes it)"
+  else skip; fi
+}
+uninstall_kitty_accents() {
+  [[ "$("$kbg" __accents_state 2>/dev/null)" == on ]] || { ok "already off"; return; }
+  "$kbg" accents off >>"$log_file" 2>&1 && ok "off (kitty's default accent colours)"
+}
+
+# ----------------------------------------------------------------- zsh ---
+zsh_pkgs=(zsh zsh-autosuggestions)
+zshrc_body="[ -f \"$repo/zsh/zshrc\" ] && . \"$repo/zsh/zshrc\""
+# GNOME starts the session through the login shell; zsh doesn't read ~/.profile
+# on its own, so flatpak apps and ~/.local/bin would go missing without this.
+zprofile_body="[ -f ~/.profile ] && emulate sh -c '. ~/.profile'"
+# Debian's /etc/zsh/zshrc runs compinit too; zsh/zshrc does it once, cached.
+zshenv_body="skip_global_compinit=1"
+label_zsh() { echo "Zsh"; }
+title_zsh() { echo "Install zsh with suggestions as you type (same tools as bash)"; }
+detail_zsh() { echo "zsh + faded suggestions; ~/.zshrc loads the same toolkit as bash"; }
+state_zsh() {
+  local n=0 missing
+  missing=$(missing_pkgs "${zsh_pkgs[@]}")
+  [[ -z "$missing" ]] && (( n++ ))
+  has_block "$HOME/.zshrc" "$zshrc_body" && (( n++ ))
+  has_block "$HOME/.zprofile" "$zprofile_body" && (( n++ ))
+  has_block "$HOME/.zshenv" "$zshenv_body" && (( n++ ))
+  NOTE=""
+  if (( n == 4 )); then STATE=installed
+  elif (( n )); then STATE=partial; NOTE="${missing:+packages missing: $missing}"
+  else STATE=missing; fi
+}
+install_zsh() {
+  local missing; missing=$(missing_pkgs "${zsh_pkgs[@]}")
+  if [[ -n "$missing" ]]; then
+    if ask "Install $missing(apt, needs sudo)?"; then
+      apt_install "${zsh_pkgs[@]}" && ok "installed" || { fail "apt failed (see $log_file)"; return 1; }
+    else skip; return 0; fi
+  fi
+  if has_block "$HOME/.zshrc" "$zshrc_body" && has_block "$HOME/.zprofile" "$zprofile_body" &&
+     has_block "$HOME/.zshenv" "$zshenv_body"; then ok "zsh config already set up"; return; fi
+  if ask "Set up ~/.zshrc, ~/.zprofile and ~/.zshenv (one managed block each)?"; then
+    set_block "$HOME/.zshrc" "$zshrc_body"
+    set_block "$HOME/.zprofile" "$zprofile_body"
+    set_block "$HOME/.zshenv" "$zshenv_body"
+    ok "done. Try it now with: ${C}zsh${R}"
+  else skip; fi
+}
+uninstall_zsh() {
+  if [[ "$(login_shell)" == */zsh ]]; then
+    warn "zsh is your login shell; switching back to bash first"
+    uninstall_login_shell || return 1
+  fi
+  drop_block "$HOME/.zshrc"; drop_block "$HOME/.zprofile"; drop_block "$HOME/.zshenv"
+  ok "removed the toolkit from ~/.zshrc, ~/.zprofile, ~/.zshenv"
+  local have=""; pkg_installed zsh && have=1
+  if [[ -n "$have" ]] && ask "Also remove the zsh packages (apt, needs sudo)?" n; then
+    as_root apt-get remove -y "${zsh_pkgs[@]}" >>"$log_file" 2>&1 && ok "packages removed" || fail "apt failed (see $log_file)"
+  fi
+}
+
+# --------------------------------------------------------- login-shell ---
+login_shell() { getent passwd "$USER" | cut -d: -f7; }
+label_login_shell() { echo "Zsh as default"; }
+title_login_shell() { echo "Open new terminals in zsh (log out once afterwards)"; }
+detail_login_shell() { echo "make zsh your default shell (new terminals; log out once for GNOME)"; }
+state_login_shell() { NOTE=""
+  command -v zsh >/dev/null || { STATE=n/a; NOTE="needs zsh first"; return; }
+  if [[ "$(login_shell)" == */zsh ]]; then STATE=installed; else STATE=missing; NOTE="now: $(login_shell)"; fi; }
+install_login_shell() {
+  local z; z=$(command -v zsh) || { skip "zsh isn't installed"; return; }
+  [[ "$(login_shell)" == "$z" ]] && { ok "already zsh"; return; }
+  if ask "Make zsh your login shell (chsh asks for your password)?"; then
+    remember_setting login-shell "$(login_shell)"
+    chsh -s "$z" && ok "done. Log out and back in so GNOME and kitty pick it up" || fail "chsh failed"
+  else skip; fi
+}
+uninstall_login_shell() {   # back to the shell you had before (bash if unknown)
+  local prev; prev=$(recall_setting login-shell)
+  [[ -n "$prev" && "$prev" != */zsh && -x "$prev" ]] || prev=/bin/bash
+  [[ "$(login_shell)" == "$prev" ]] && { ok "already $prev"; forget_setting login-shell; return 0; }
+  chsh -s "$prev" && { forget_setting login-shell; ok "login shell is ${prev##*/} again (log out and back in)"; } || { fail "chsh failed"; return 1; }
+}
+
+# --------------------------------------------------------- kitty-icons ---
+icon_dir="$HOME/.local/share/icons/kitty-custom"
+label_kitty_icons() { echo "Kitty icons"; }
+title_kitty_icons() { echo "Extra kitty app icons to pick from (k-icon)"; }
+detail_kitty_icons() { echo "extra kitty icons + the k-icon picker"; }
+state_kitty_icons() { NOTE=""
+  [[ -f /usr/share/applications/kitty.desktop || -f "$kapp/share/applications/kitty.desktop" ]] ||
+    { STATE=n/a; NOTE="kitty isn't installed"; return; }
+  local n; n=$(find "$icon_dir" -maxdepth 1 -name '*.png' 2>/dev/null | wc -l)
+  if (( n >= 3 )) && grep -q "^Icon=$icon_dir/" "$kitty_desktop" 2>/dev/null; then STATE=installed
+  elif (( n )) || [[ -f "$kitty_desktop" ]]; then STATE=partial
+  else STATE=missing; fi; }
+install_kitty_icons() { ask "Run kitty/install-kitty-icons.sh?" && bash "$repo/kitty/install-kitty-icons.sh" || skip; }
+uninstall_kitty_icons() { bash "$repo/kitty/cleanup-kitty-icons.sh"; }
+
+# ------------------------------------------------------ kitty-nautilus ---
+nat_ext="$HOME/.local/share/nautilus-python/extensions/nautilus_open_any_terminal.py"
+nat_schema="com.github.stunkymonkey.nautilus-open-any-terminal"
+label_kitty_nautilus() { echo "Kitty in Files"; }
+title_kitty_nautilus() { echo "Make kitty the default terminal and add \"Open in Terminal\" to Files"; }
+detail_kitty_nautilus() { echo "kitty as default terminal, 'Open in Terminal' in Files"; }
+state_kitty_nautilus() { NOTE=""
+  command -v kitty >/dev/null && command -v nautilus >/dev/null || { STATE=n/a; NOTE="needs kitty and nautilus"; return; }
+  local n=0
+  [[ -f "$nat_ext" ]] && (( n++ ))
+  [[ "$(gsettings get "$nat_schema" terminal 2>/dev/null)" == "'kitty'" ]] && (( n++ ))
+  [[ "$(term_alt)" == /usr/bin/kitty || "$(term_alt)" == "$kapp_bin" ]] && (( n++ ))
+  if (( n == 3 )); then STATE=installed; elif (( n )); then STATE=partial; else STATE=missing; fi; }
+install_kitty_nautilus() { ask "Run kitty/install-kitty-gnome.sh (may need sudo)?" && bash "$repo/kitty/install-kitty-gnome.sh" || skip; }
+uninstall_kitty_nautilus() { bash "$repo/kitty/uninstall-kitty-gnome.sh"; }
+
+# ------------------------------------------------------ kitty-centered ---
+# GNOME places new windows by itself; this makes it open them in the middle of
+# the screen (kitty can't choose its own position on Wayland).
+ctr_schema=org.gnome.mutter ctr_key=center-new-windows
+label_kitty_centered() { echo "Centered windows"; }
+title_kitty_centered() { echo "Open new windows (kitty included) in the middle of the screen"; }
+detail_kitty_centered() { echo "GNOME setting $ctr_schema $ctr_key = true (your old value is kept for the uninstall)"; }
+state_kitty_centered() { NOTE=""
+  command -v gsettings >/dev/null && gsettings list-keys "$ctr_schema" 2>/dev/null | grep -qx "$ctr_key" ||
+    { STATE=n/a; NOTE="needs GNOME"; return; }
+  if [[ "$(gsettings get "$ctr_schema" "$ctr_key")" == true ]]; then STATE=installed; else STATE=missing; fi; }
+install_kitty_centered() {
+  [[ "$(gsettings get "$ctr_schema" "$ctr_key")" == true ]] && { ok "already on"; return; }
+  ask "Open new windows in the middle of the screen?" || { skip; return; }
+  remember_setting kitty-centered "$(gsettings get "$ctr_schema" "$ctr_key")"
+  gsettings set "$ctr_schema" "$ctr_key" true && ok "new windows open centered"
+}
+uninstall_kitty_centered() {
+  local prev; prev=$(recall_setting kitty-centered)
+  [[ -n "$prev" ]] || { ok "nothing of ours to undo"; return; }
+  gsettings set "$ctr_schema" "$ctr_key" "$prev" && ok "back to $prev"
+  forget_setting kitty-centered
+}
+
+# ------------------------------------------------------- no-animations ---
+# GNOME's window zoom animations make fast open/close windows (the rofi launcher) flash blurry.
+anim_schema=org.gnome.desktop.interface anim_key=enable-animations
+label_no_animations() { echo "No window animations"; }
+title_no_animations() { echo "Turn off GNOME's window animations (no blur flash when the launcher opens and closes fast)"; }
+detail_no_animations() { echo "GNOME setting $anim_schema $anim_key = false (your old value is kept for the uninstall)"; }
+state_no_animations() { NOTE=""
+  command -v gsettings >/dev/null && gsettings list-keys "$anim_schema" 2>/dev/null | grep -qx "$anim_key" ||
+    { STATE=n/a; NOTE="needs GNOME"; return; }
+  if [[ "$(gsettings get "$anim_schema" "$anim_key")" == false ]]; then STATE=installed; else STATE=missing; fi; }
+install_no_animations() {
+  [[ "$(gsettings get "$anim_schema" "$anim_key")" == false ]] && { ok "already off"; return; }
+  ask "Turn off GNOME's window animations?" n || { skip; return; }
+  remember_setting no-animations "$(gsettings get "$anim_schema" "$anim_key")"
+  gsettings set "$anim_schema" "$anim_key" false && ok "animations off"
+}
+uninstall_no_animations() {
+  local prev; prev=$(recall_setting no-animations)
+  [[ -n "$prev" ]] || { ok "nothing of ours to undo"; return; }
+  gsettings set "$anim_schema" "$anim_key" "$prev" && ok "back to $prev"
+  forget_setting no-animations
+}
+
+# -------------------------------------------------------- vitals-icons ---
+# Clear CPU and memory icons for the Vitals top-bar extension (gnome/vitals-icons).
+# They go over the extension's "original" icon style; the old files are kept as
+# *.toolkit-orig for the uninstall. An extension update puts the stock icons back,
+# so run the setup again after one. Also centres the dropdown under the Vitals pill.
+vi_dir="$HOME/.local/share/gnome-shell/extensions/Vitals@CoreCoding.com/icons/original"
+vi_files=(cpu-symbolic.svg memory-symbolic.svg)
+vi_gs() { gsettings --schemadir "$vi_dir/../../schemas" "$@"; }
+vi_key=org.gnome.shell.extensions.vitals
+vi_centered() { [[ "$(vi_gs get $vi_key menu-centered 2>/dev/null)" == true ]]; }
+vi_same() { local f; for f in "${vi_files[@]}"; do cmp -s "$repo/gnome/vitals-icons/$f" "$vi_dir/$f" || return 1; done; }
+label_vitals_icons() { echo "Vitals icons"; }
+title_vitals_icons() { echo "Clear CPU chip and RAM chip icons in the Vitals top bar, dropdown centred under it"; }
+detail_vitals_icons() { echo "two SVGs copied into the Vitals extension's icons/original folder (stock ones kept for the uninstall); Vitals setting menu-centered = true"; }
+state_vitals_icons() { NOTE=""
+  [[ -d "$vi_dir" ]] || { STATE=n/a; NOTE="needs the Vitals extension"; return; }
+  if vi_same && vi_centered; then STATE=installed; else STATE=missing; fi; }
+install_vitals_icons() {
+  vi_same && vi_centered && { ok "already in place"; return; }
+  ask "Replace Vitals' CPU and memory icons with the chip icons and centre its dropdown?" || { skip; return; }
+  dry && return
+  local f
+  for f in "${vi_files[@]}"; do
+    [[ -e "$vi_dir/$f.toolkit-orig" ]] || cp "$vi_dir/$f" "$vi_dir/$f.toolkit-orig"
+    cp "$repo/gnome/vitals-icons/$f" "$vi_dir/$f"
+  done
+  remember_setting vitals-menu-centered "$(vi_gs get $vi_key menu-centered)"
+  vi_gs set $vi_key menu-centered true
+  ok "icons copied, dropdown centred ${D}(turn the extension off and on, or log out, to see the icons)${R}"
+}
+uninstall_vitals_icons() {
+  local f n=0
+  for f in "${vi_files[@]}"; do
+    [[ -e "$vi_dir/$f.toolkit-orig" ]] && { mv "$vi_dir/$f.toolkit-orig" "$vi_dir/$f"; n=1; }
+  done
+  local prev; prev=$(recall_setting vitals-menu-centered)
+  [[ -n "$prev" ]] && { vi_gs set $vi_key menu-centered "$prev"; forget_setting vitals-menu-centered; n=1; }
+  (( n )) && ok "stock icons and dropdown position back" || ok "nothing of ours to undo"
+}
+
+# -------------------------------------------------------- window-calls ---
+# GNOME extension that lets scripts list, focus and close windows over D-Bus.
+# ws uses it to close a workspace's window and to read open windows exactly.
+wc_uuid="window-calls@domandoman.xyz"
+wc_enabled() { gsettings get org.gnome.shell enabled-extensions 2>/dev/null | grep -q "'$wc_uuid'"; }
+wc_present() { [[ -d "$HOME/.local/share/gnome-shell/extensions/$wc_uuid" ]]; }
+wc_live() { gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/Shell/Extensions/Windows \
+  --method org.gnome.Shell.Extensions.Windows.List >/dev/null 2>&1; }
+label_window_calls() { echo "Window Calls"; }
+title_window_calls() { echo "Let ws close and focus editor windows (GNOME extension; log out once)"; }
+detail_window_calls() { echo "GNOME extension $wc_uuid from extensions.gnome.org into ~/.local/share/gnome-shell/extensions"; }
+state_window_calls() {
+  NOTE=""
+  command -v gnome-shell >/dev/null || { STATE=n/a; NOTE="needs GNOME"; return; }
+  if wc_present && wc_enabled; then
+    if wc_live; then STATE=installed; else STATE=partial; NOTE="log out and back in to load it"; fi
+  elif wc_present; then STATE=partial; NOTE="installed, not enabled"
+  else STATE=missing; fi
+}
+install_window_calls() {
+  local ver url tmp
+  if wc_present && wc_enabled; then
+    wc_live && ok "already active" || ok "installed; log out and back in once to load it"
+    return
+  fi
+  if ! wc_present; then
+    ask "Download Window Calls from extensions.gnome.org and install it?" || { skip; return; }
+    ver=$(gnome-shell --version | grep -oE '[0-9]+' | head -1)
+    url=$(curl -fsS "https://extensions.gnome.org/extension-info/?uuid=$wc_uuid&shell_version=$ver" |
+      python3 -Ic 'import json,sys; print(json.load(sys.stdin)["download_url"])' 2>/dev/null)
+    [[ -n "$url" ]] || { fail "no Window Calls release for GNOME $ver"; return; }
+    tmp=$(mktemp --suffix=.zip)
+    if curl -fsSL -o "$tmp" "https://extensions.gnome.org$url" && gnome-extensions install --force "$tmp" >>"$log_file" 2>&1; then
+      ok "installed"; logf "  from https://extensions.gnome.org$url"
+    else rm -f "$tmp"; fail "download or install failed (see the log)"; return; fi
+    rm -f "$tmp"
+  fi
+  # `gnome-extensions enable` can't see it until GNOME reloads, so add it to the list directly.
+  python3 -I - "$wc_uuid" <<'PY'
+import ast, subprocess, sys
+cur = subprocess.run(["gsettings", "get", "org.gnome.shell", "enabled-extensions"], capture_output=True, text=True).stdout.strip()
+lst = ast.literal_eval(cur.removeprefix("@as ")) if cur else []
+if sys.argv[1] not in lst:
+    subprocess.run(["gsettings", "set", "org.gnome.shell", "enabled-extensions", str(lst + [sys.argv[1]])], check=True)
+PY
+  ok "enabled"
+  warn "log out and back in once (Wayland loads new extensions only at login)"
+}
+uninstall_window_calls() {
+  wc_present || { ok "not installed"; return; }
+  gnome-extensions disable "$wc_uuid" >/dev/null 2>&1
+  python3 -I - "$wc_uuid" <<'PY'
+import ast, subprocess, sys
+cur = subprocess.run(["gsettings", "get", "org.gnome.shell", "enabled-extensions"], capture_output=True, text=True).stdout.strip()
+lst = ast.literal_eval(cur.removeprefix("@as ")) if cur else []
+if sys.argv[1] in lst:
+    subprocess.run(["gsettings", "set", "org.gnome.shell", "enabled-extensions", str([x for x in lst if x != sys.argv[1]])], check=True)
+PY
+  if gnome-extensions uninstall "$wc_uuid" >/dev/null 2>&1 || rm -rf "$HOME/.local/share/gnome-shell/extensions/$wc_uuid"; then
+    ok "removed (ws close stops working; everything else in ws stays)"
+  fi
+}
+
+# ------------------------------------------------------ alt-tab-desktop ---
+# After Super+D (show desktop), Alt+Tab goes back to the window you minimized,
+# not the one before it. Small GNOME extension kept in gnome/ and linked in.
+atd_uuid="alt-tab-desktop@work-toolkit"
+atd_dir="$HOME/.local/share/gnome-shell/extensions/$atd_uuid"; atd_src="$repo/gnome/$atd_uuid"
+atd_enabled() { gsettings get org.gnome.shell enabled-extensions 2>/dev/null | grep -q "'$atd_uuid'"; }
+ext_list() { # ext_list add|del UUID: edit GNOME's list of enabled extensions
+  python3 -I -c '
+import ast, subprocess, sys
+cur = subprocess.run(["gsettings", "get", "org.gnome.shell", "enabled-extensions"], capture_output=True, text=True).stdout.strip()
+lst = ast.literal_eval(cur.removeprefix("@as ")) if cur else []
+op, uuid = sys.argv[1], sys.argv[2]
+new = lst + [uuid] if op == "add" and uuid not in lst else [x for x in lst if not (op == "del" and x == uuid)]
+if new != lst:
+    subprocess.run(["gsettings", "set", "org.gnome.shell", "enabled-extensions", str(new)], check=True)
+' "$1" "$2"
+}
+label_alt_tab_desktop() { echo "Alt+Tab after Show Desktop"; }
+title_alt_tab_desktop() { echo "After Super+D, Alt+Tab returns to the window you minimized (GNOME extension; log out once)"; }
+detail_alt_tab_desktop() { echo "~/.local/share/gnome-shell/extensions/$atd_uuid -> gnome/$atd_uuid, added to enabled extensions"; }
+state_alt_tab_desktop() { NOTE=""
+  command -v gnome-shell >/dev/null || { STATE=n/a; NOTE="needs GNOME"; return; }
+  if linked "$atd_dir" "$atd_src" && atd_enabled; then STATE=installed
+  elif linked "$atd_dir" "$atd_src" || atd_enabled; then STATE=partial
+  else STATE=missing; fi; }
+install_alt_tab_desktop() {
+  if linked "$atd_dir" "$atd_src" && atd_enabled; then ok "already installed"; return; fi
+  ask "Make Alt+Tab return to the window you minimized with Super+D?" || { skip; return; }
+  mkdir -p "$(dirname "$atd_dir")"
+  linked "$atd_dir" "$atd_src" || link_file "$atd_dir" "$atd_src" || return 1
+  ext_list add "$atd_uuid" && ok "enabled"
+  warn "log out and back in once (Wayland loads new extensions only at login)"
+}
+uninstall_alt_tab_desktop() {
+  ext_list del "$atd_uuid"
+  unlink_file "$atd_dir" "$atd_src"
+}
+
+# ---------------------------------------------------------- dash2dock ---
+# Dash2Dock Animated (GNOME extension, macOS-style dock) from extensions.gnome.org, with
+# the toolkit's patches (gnome/dash2dock/dash2dock.patch, written against release 92):
+#  - a click on an app with several windows shows live window previews;
+#  - dragging an icon to reorder no longer flickers;
+#  - windows stop exactly at the dock (no extra gap); the dock panel catches the mouse.
+# Plus a preset look (gnome/dash2dock/settings.dconf). Replaces Ubuntu's dock while it's on.
+# Pick this, dash-to-panel (below), or both.
+d2d_uuid="dash2dock-lite@icedman.github.com"
+d2d_dir="$HOME/.local/share/gnome-shell/extensions/$d2d_uuid"; d2d_src="$repo/gnome/dash2dock"
+d2d_path=/org/gnome/shell/extensions/dash2dock-lite/
+d2d_present() { [[ -d "$d2d_dir" ]]; }
+d2d_patched() { grep -q "work-toolkit patch" "$d2d_dir/dock.js" 2>/dev/null; }
+d2d_enabled() { gsettings get org.gnome.shell enabled-extensions 2>/dev/null | grep -q "'$d2d_uuid'"; }
+ext_is_on() { gnome-extensions list --enabled 2>/dev/null | grep -qx "$1"; }
+# ext_download UUID NAME: fetch the release for this GNOME from extensions.gnome.org and install it
+ext_download() {
+  local ver url tmp
+  ver=$(gnome-shell --version | grep -oE '[0-9]+' | head -1)
+  url=$(curl -fsS "https://extensions.gnome.org/extension-info/?uuid=$1&shell_version=$ver" |
+    python3 -Ic 'import json,sys; print(json.load(sys.stdin)["download_url"])' 2>/dev/null)
+  [[ -n "$url" ]] || { fail "no $2 release for GNOME $ver"; return 1; }
+  tmp=$(mktemp --suffix=.zip)
+  if curl -fsSL -o "$tmp" "https://extensions.gnome.org$url" && gnome-extensions install --force "$tmp" >>"$log_file" 2>&1; then
+    ok "installed"; logf "  from https://extensions.gnome.org$url"
+  else rm -f "$tmp"; fail "download or install failed (see the log)"; return 1; fi
+  rm -f "$tmp"
+}
+# The launcher entry (gives rofi's window an icon in a dock or panel); shared by rofi, dash2dock and dash-to-panel
+launcher_icon_dir="$HOME/.local/share/icons/hicolor/512x512/apps"; launcher_icon="$launcher_icon_dir/k-launch.png"
+launcher_entry_wanted() { d2d_present || d2d_other_bar || kb_has rofi-launcher; }
+remove_launcher_entry() {
+  launcher_entry_wanted && return 0
+  rm -f "$HOME/.local/share/applications/k-launch.desktop" "$launcher_icon" "$HOME/.local/share/icons/hicolor/scalable/apps/k-launch.svg"
+}
+install_launcher_entry() {
+  mkdir -p "$launcher_icon_dir" "$HOME/.local/share/applications"
+  convert "$repo/rofi/rofi-icon.png" -resize 512x512 "$launcher_icon" 2>>"$log_file" ||
+    install -m 644 "$repo/rofi/rofi-icon.png" "$launcher_icon"
+  printf '%s\n' "[Desktop Entry]" "Type=Application" "Name=Launcher" "Comment=App launcher (Alt+Space)" \
+    "Exec=$repo/rofi/bin/k-launch apps" "Icon=k-launch" "Terminal=false" "Categories=Utility;" "StartupWMClass=Rofi" \
+    >"$HOME/.local/share/applications/k-launch.desktop"
+}
+label_dash2dock() { echo "Dash2Dock dock"; }
+title_dash2dock() { echo "macOS-style dock with window previews on click (replaces Ubuntu's dock; log out once)"; }
+detail_dash2dock() { echo "GNOME extension $d2d_uuid from extensions.gnome.org + gnome/dash2dock patches and preset look; turns Ubuntu's dock off (put back by the uninstall)"; }
+state_dash2dock() { NOTE=""
+  command -v gnome-shell >/dev/null || { STATE=n/a; NOTE="needs GNOME"; return; }
+  if d2d_present && d2d_patched && d2d_enabled; then STATE=installed
+  elif d2d_present || d2d_enabled; then STATE=partial
+  else STATE=missing; fi; }
+install_dash2dock() {
+  if d2d_present && d2d_patched && d2d_enabled; then ok "already installed"; return; fi
+  ask "Install the Dash2Dock dock (replaces Ubuntu's dock)?" n || { skip; return; }
+  command -v patch >/dev/null || { fail "the 'patch' tool is missing (sudo apt install patch)"; return 1; }
+  d2d_present || ext_download "$d2d_uuid" Dash2Dock || return 1
+  if d2d_patched; then ok "patches already in"
+  elif patch -p1 -N --dry-run -s -d "$d2d_dir" <"$d2d_src/dash2dock.patch" >>"$log_file" 2>&1; then
+    patch -p1 -N -s -b -z .orig -d "$d2d_dir" <"$d2d_src/dash2dock.patch" >>"$log_file" 2>&1 &&
+      ok "patched: window previews, calm drag, no gap (originals kept as *.orig)"
+  else
+    warn "this Dash2Dock release ($(grep -o '"version": *[0-9]*' "$d2d_dir/metadata.json" | grep -o '[0-9]*$')) doesn't match our patches (written for 92): the dock works, but without them"
+  fi
+  if ask "Use the toolkit's look for it (size, full-width panel, colours)? Your current settings are kept for the uninstall."; then
+    mkdir -p "$orig_dir"
+    [[ -f "$orig_dir/dash2dock.dconf" ]] || dconf dump "$d2d_path" >"$orig_dir/dash2dock.dconf" 2>/dev/null
+    dconf load "$d2d_path" <"$d2d_src/settings.dconf" && ok "look applied"
+  else skip; fi
+  install_launcher_entry
+  if ext_is_on ubuntu-dock@ubuntu.com; then   # Ubuntu's dock would sit next to it
+    remember_setting dock-ubuntu on
+    gnome-extensions disable ubuntu-dock@ubuntu.com >>"$log_file" 2>&1 && ok "Ubuntu's dock off"
+  fi
+  ext_list add "$d2d_uuid" && ok "enabled"
+  warn "log out and back in once (Wayland loads new extensions only at login)"
+}
+uninstall_dash2dock() {
+  ext_list del "$d2d_uuid"
+  if d2d_present; then
+    gnome-extensions disable "$d2d_uuid" >/dev/null 2>&1
+    gnome-extensions uninstall "$d2d_uuid" >/dev/null 2>&1 || rm -rf "$d2d_dir"
+    ok "dock removed"
+  fi
+  dconf reset -f "$d2d_path"
+  [[ -f "$orig_dir/dash2dock.dconf" ]] && { dconf load "$d2d_path" <"$orig_dir/dash2dock.dconf"; rm -f "$orig_dir/dash2dock.dconf"; }
+  if [[ "$(recall_setting dock-ubuntu)" == on ]]; then
+    gnome-extensions enable ubuntu-dock@ubuntu.com >/dev/null 2>&1 && ok "Ubuntu's dock back on"
+    forget_setting dock-ubuntu
+  fi
+  remove_launcher_entry
+}
+d2d_other_bar() { [[ -d "$HOME/.local/share/gnome-shell/extensions/dash-to-panel@jderose9.github.com" ]]; }
+
+# ------------------------------------------------------- dash-to-panel ---
+# Dash to Panel (GNOME extension) from extensions.gnome.org: dock and top bar merged into one
+# bar. App icons (with window previews) on the left, clock, Vitals and system menu on the
+# right; no Activities button (Super opens the overview). The preset (your own tuned look:
+# gnome/dash-to-panel/settings.dconf) puts it at the bottom with a new apps-button icon.
+# Pick this, dash2dock (above), or both.
+dtp_uuid="dash-to-panel@jderose9.github.com"
+dtp_dir="$HOME/.local/share/gnome-shell/extensions/$dtp_uuid"; dtp_src="$repo/gnome/dash-to-panel"
+dtp_path=/org/gnome/shell/extensions/dash-to-panel/
+dtp_present() { [[ -d "$dtp_dir" ]]; }
+dtp_enabled() { gsettings get org.gnome.shell enabled-extensions 2>/dev/null | grep -q "'$dtp_uuid'"; }
+label_dash_to_panel() { echo "One bar (Dash to Panel)"; }
+title_dash_to_panel() { echo "dock and top bar merged into one bar, no Activities button (log out once)"; }
+detail_dash_to_panel() { echo "GNOME extension $dtp_uuid from extensions.gnome.org + preset look gnome/dash-to-panel; turns Ubuntu's dock off (put back by the uninstall)"; }
+state_dash_to_panel() { NOTE=""
+  command -v gnome-shell >/dev/null || { STATE=n/a; NOTE="needs GNOME"; return; }
+  if dtp_present && dtp_enabled; then STATE=installed
+  elif dtp_present || dtp_enabled; then STATE=partial
+  else STATE=missing; fi; }
+install_dash_to_panel() {
+  if dtp_present && dtp_enabled; then ok "already installed"; return; fi
+  ask "Merge the dock and top bar into one bar (Dash to Panel)?" n || { skip; return; }
+  dtp_present || ext_download "$dtp_uuid" "Dash to Panel" || return 1
+  if ask "Use the toolkit's look for it (bottom bar, 35 px, dark, new apps-button icon)? Your current settings are kept for the uninstall."; then
+    mkdir -p "$orig_dir"
+    [[ -f "$orig_dir/dash-to-panel.dconf" ]] || dconf dump "$dtp_path" >"$orig_dir/dash-to-panel.dconf" 2>/dev/null
+    sed "s#@REPO@#$repo#" "$dtp_src/settings.dconf" | dconf load "$dtp_path" && ok "look applied"
+  else skip; fi
+  install_launcher_entry
+  if ext_is_on ubuntu-dock@ubuntu.com; then
+    remember_setting dock-ubuntu on
+    gnome-extensions disable ubuntu-dock@ubuntu.com >>"$log_file" 2>&1 && ok "Ubuntu's dock off"
+  fi
+  ext_list add "$dtp_uuid" && ok "enabled"
+  warn "log out and back in once (Wayland loads new extensions only at login)"
+}
+uninstall_dash_to_panel() {
+  ext_list del "$dtp_uuid"
+  if dtp_present; then
+    gnome-extensions disable "$dtp_uuid" >/dev/null 2>&1
+    gnome-extensions uninstall "$dtp_uuid" >/dev/null 2>&1 || rm -rf "$dtp_dir"
+    ok "bar removed"
+  fi
+  dconf reset -f "$dtp_path"
+  [[ -f "$orig_dir/dash-to-panel.dconf" ]] && { dconf load "$dtp_path" <"$orig_dir/dash-to-panel.dconf"; rm -f "$orig_dir/dash-to-panel.dconf"; }
+  if [[ "$(recall_setting dock-ubuntu)" == on ]] && ! d2d_present; then
+    gnome-extensions enable ubuntu-dock@ubuntu.com >/dev/null 2>&1 && ok "Ubuntu's dock back on"
+    forget_setting dock-ubuntu
+  fi
+  remove_launcher_entry
+}
+
+# ------------------------------------------------------ hide-docker-tray ---
+# Docker Desktop's tray item has no icon and an empty menu: three dots that do nothing on click.
+# Small GNOME extension (gnome/hide-docker-tray@work-toolkit), linked in, that keeps it hidden.
+hdt_uuid="hide-docker-tray@work-toolkit"
+hdt_dir="$HOME/.local/share/gnome-shell/extensions/$hdt_uuid"; hdt_src="$repo/gnome/$hdt_uuid"
+hdt_enabled() { gsettings get org.gnome.shell enabled-extensions 2>/dev/null | grep -q "'$hdt_uuid'"; }
+label_hide_docker_tray() { echo "Hide Docker's tray dots"; }
+title_hide_docker_tray() { echo "hides Docker Desktop's dead three-dots tray icon (GNOME extension; log out once)"; }
+detail_hide_docker_tray() { echo "~/.local/share/gnome-shell/extensions/$hdt_uuid -> gnome/$hdt_uuid, added to enabled extensions"; }
+state_hide_docker_tray() { NOTE=""
+  command -v gnome-shell >/dev/null || { STATE=n/a; NOTE="needs GNOME"; return; }
+  if linked "$hdt_dir" "$hdt_src" && hdt_enabled; then STATE=installed
+  elif linked "$hdt_dir" "$hdt_src" || hdt_enabled; then STATE=partial
+  else STATE=missing; fi; }
+install_hide_docker_tray() {
+  if linked "$hdt_dir" "$hdt_src" && hdt_enabled; then ok "already installed"; return; fi
+  ask "Hide Docker Desktop's dead three-dots tray icon?" || { skip; return; }
+  mkdir -p "$(dirname "$hdt_dir")"
+  linked "$hdt_dir" "$hdt_src" || link_file "$hdt_dir" "$hdt_src" || return 1
+  ext_list add "$hdt_uuid" && ok "enabled"
+  warn "log out and back in once (Wayland loads new extensions only at login)"
+}
+uninstall_hide_docker_tray() {
+  ext_list del "$hdt_uuid"
+  unlink_file "$hdt_dir" "$hdt_src"
+}
+
+# ---------------------------------------------------------------- rofi ---
+# Rofi as the app launcher: Alt+Space apps (Tab for ssh, windows, run), Alt+Shift+Space ssh.
+# Rofi 1.7 is an X11 program; -normal-window (set by rofi/bin/k-launch) lets it take the keyboard on GNOME's Wayland.
+rofi_conf="$HOME/.config/rofi/config.rasi"; rofi_src="$repo/rofi/config.rasi"
+kb_base=/org/gnome/settings-daemon/plugins/media-keys
+kb_root=org.gnome.settings-daemon.plugins.media-keys
+kb_schema=$kb_root.custom-keybinding
+kb_set() { # kb_set ID NAME COMMAND BINDING
+  local path="$kb_base/custom-keybindings/$1/" cur
+  gsettings set "$kb_schema:$path" name "$2"; gsettings set "$kb_schema:$path" command "$3"; gsettings set "$kb_schema:$path" binding "$4"
+  cur=$(gsettings get $kb_root custom-keybindings)
+  [[ "$cur" == *"'$path'"* ]] && return 0
+  if [[ "$cur" == *"[]"* ]]; then cur="['$path']"; else cur="${cur%]}, '$path']"; fi
+  gsettings set $kb_root custom-keybindings "$cur"
+}
+kb_has() { gsettings get $kb_root custom-keybindings | grep -q "'$kb_base/custom-keybindings/$1/'"; }
+kb_del() {
+  local path="$kb_base/custom-keybindings/$1/" cur
+  cur=$(gsettings get $kb_root custom-keybindings)
+  cur=$(python3 -I -c 'import ast,sys; print([x for x in ast.literal_eval(sys.argv[1].removeprefix("@as ")) if x != sys.argv[2]])' "$cur" "$path")
+  gsettings set $kb_root custom-keybindings "$cur"; dconf reset -f "$path"
+}
+label_rofi() { echo "Rofi launcher"; }
+title_rofi() { echo "Alt+Space opens an app launcher (Alt+Shift+Space ssh, Super+X power menu, Super+S speaker/mic/wifi/bluetooth), styled like kitty"; }
+detail_rofi() { echo "rofi (apt) if missing; ~/.config/rofi/config.rasi -> rofi/config.rasi; four GNOME shortcuts (Alt+Space, Alt+Shift+Space, Super+X, Super+S); launcher icon (rofi/rofi-icon.png) in the app list and dock"; }
+state_rofi() { NOTE=""
+  command -v gsettings >/dev/null || { STATE=n/a; NOTE="needs GNOME"; return; }
+  local n=0
+  command -v rofi >/dev/null && (( n++ ))
+  linked "$rofi_conf" "$rofi_src" && (( n++ ))
+  kb_has rofi-launcher && kb_has rofi-ssh && kb_has rofi-power && kb_has rofi-devices && (( n++ ))
+  [[ -f "$launcher_icon" && -f "$HOME/.local/share/applications/k-launch.desktop" ]] && (( n++ ))
+  if (( n == 4 )); then STATE=installed; elif (( n )); then STATE=partial; else STATE=missing; fi; }
+install_rofi() {
+  if ! command -v rofi >/dev/null; then
+    if ask "Install rofi? (apt, needs sudo)"; then
+      apt_install rofi && ok "installed" || { fail "apt failed (see $log_file)"; return 1; }
+    else skip; return 0; fi
+  fi
+  if linked "$rofi_conf" "$rofi_src"; then ok "rofi style already linked"
+  else ask "Use the toolkit's rofi style? (your own is kept as a backup)" && link_file "$rofi_conf" "$rofi_src" || { skip; return 0; }; fi
+  dry || "$repo/kitty/bin/k-rofi" >>"$log_file" 2>&1 && ok "colours follow k-theme and k-bg"
+  if [[ -f "$launcher_icon" ]]; then ok "launcher icon already installed"
+  else dry || install_launcher_entry && ok "launcher icon installed (log out and back in if the dock still shows none)"; fi
+  if kb_has rofi-launcher && kb_has rofi-ssh && kb_has rofi-power && kb_has rofi-devices; then ok "shortcuts already set"
+  elif ask "Set Alt+Space (apps), Alt+Shift+Space (ssh), Super+X (power menu) and Super+S (speaker, mic, wifi, bluetooth)?"; then
+    kb_set rofi-launcher "Rofi launcher" "$repo/rofi/bin/k-launch apps" "<Alt>space"
+    kb_set rofi-ssh "Rofi ssh" "$repo/rofi/bin/k-launch ssh" "<Alt><Shift>space"
+    kb_set rofi-power "Rofi power" "$repo/rofi/bin/k-launch power" "<Super>x"
+    kb_set rofi-devices "Rofi speaker, mic, wifi, bluetooth" "$repo/rofi/bin/k-launch settings" "<Super>s"
+    ok "Alt+Space = apps, Alt+Shift+Space = ssh, Super+X = power menu, Super+S = speaker/mic/wifi/bluetooth"
+  else skip; fi
+}
+uninstall_rofi() {
+  kb_has rofi-launcher && kb_del rofi-launcher
+  kb_has rofi-ssh && kb_del rofi-ssh
+  kb_has rofi-power && kb_del rofi-power
+  kb_has rofi-devices && kb_del rofi-devices
+  unlink_file "$rofi_conf" "$rofi_src"
+  rm -f "${rofi_conf%/*}/colors.rasi"
+  remove_launcher_entry
+  if command -v rofi >/dev/null && ask "Also remove the rofi package? (apt, needs sudo)" n; then
+    as_root apt-get remove -y rofi >>"$log_file" 2>&1 && ok "package removed" || fail "apt failed (see $log_file)"
+  fi
+}
+
+# ------------------------------------------------------------ app-keys ---
+# Super+1..9 = the Nth pinned app in the dock: launch it, bring it to the front, or (when it
+# is already in front) minimize it. bin/k-appkey does the work, one short process per key press;
+# it uses Window Calls to find and minimize windows. GNOME's own Super+1..9 is switched off
+# while this is on (the two would clash) and comes back with the uninstall.
+ak_n=(1 2 3 4 5 6 7 8 9)
+ak_keys_on() { local i; for i in "${ak_n[@]}"; do kb_has "app-key-$i" || return 1; done; }
+ak_native_off() { [[ "$(gsettings get org.gnome.shell.keybindings switch-to-application-1)" == "@as []" ]]; }
+label_app_keys() { echo "Super+number app keys"; }
+title_app_keys() { echo "Super+1..9 launches, raises or minimizes the Nth dock app (needs Window Calls; replaces GNOME's own)"; }
+detail_app_keys() { echo "nine GNOME shortcuts (Super+1..9) running bin/k-appkey; GNOME's switch-to-application keys turned off (put back by the uninstall)"; }
+state_app_keys() { NOTE=""
+  command -v gsettings >/dev/null || { STATE=n/a; NOTE="needs GNOME"; return; }
+  if ak_keys_on && ak_native_off; then STATE=installed
+  elif ak_keys_on || ak_native_off; then STATE=partial
+  else STATE=missing; fi; }
+install_app_keys() {
+  local i
+  if ak_keys_on && ak_native_off; then ok "already set"; return; fi
+  ask "Make Super+1..9 launch, raise or minimize the Nth dock app?" n || { skip; return; }
+  wc_live || warn "Window Calls isn't active yet: until it is, Super+number only launches / raises (install it, then log out once)"
+  chmod +x "$repo/bin/k-appkey"
+  remember_setting app-keys-native "$(gsettings get org.gnome.shell.keybindings switch-to-application-1)"
+  for i in "${ak_n[@]}"; do gsettings set org.gnome.shell.keybindings "switch-to-application-$i" "[]"; done
+  for i in "${ak_n[@]}"; do kb_set "app-key-$i" "App key $i" "$repo/bin/k-appkey $i" "<Super>$i"; done
+  ok "Super+1..9 set (the keys work right away)"
+}
+uninstall_app_keys() {
+  local i
+  for i in "${ak_n[@]}"; do kb_has "app-key-$i" && kb_del "app-key-$i"; done
+  if [[ -n "$(recall_setting app-keys-native)" ]]; then
+    for i in "${ak_n[@]}"; do gsettings reset org.gnome.shell.keybindings "switch-to-application-$i"; done
+    forget_setting app-keys-native
+    ok "GNOME's own Super+1..9 back"
+  fi
+}
+
+# -------------------------------------------------------- eks-clusters ---
+# Runs kx sync: tick the AWS accounts to search, then the clusters to add.
+# Unticked ones go in ~/.config/kx/ignore, so later syncs skip them.
+kx_ignore_file="${XDG_CONFIG_HOME:-$HOME/.config}/kx/ignore"
+eks_contexts() { KUBECONFIG="${KX_BASE_KUBECONFIG:-$HOME/.kube/config}" kubectl config get-contexts -o name 2>/dev/null | grep -c .; }
+label_eks_clusters() { echo "EKS clusters"; }
+title_eks_clusters() { echo "Pick which AWS accounts and EKS clusters kx shows"; }
+detail_eks_clusters() { echo "runs kx sync: ticked clusters go in ~/.kube/config, unticked ones in ~/.config/kx/ignore (kx ignore / kx sync to change later)"; }
+state_eks_clusters() {
+  local n; NOTE=""
+  command -v kubectl >/dev/null && command -v aws >/dev/null || { STATE=n/a; NOTE="needs kubectl and the aws CLI"; return; }
+  n=$(eks_contexts)
+  if (( n )) || [[ -e $kx_ignore_file ]]; then STATE=installed; NOTE="$n context(s) · kx sync / kx ignore to change"
+  else STATE=missing; fi
+}
+install_eks_clusters() {
+  (( $(eks_contexts) )) && { ok "already set up ${D}(kx sync / kx ignore to change)${R}"; return; }
+  if dry; then say "      ${D}would run kx sync: tick AWS accounts, then the clusters to add${R}"; return; fi
+  if ! "$repo/okta/bin/okcli" __profiles 2>/dev/null | grep -q .; then
+    warn "okcli has no AWS profiles yet: run ${B}okcli sync${R}, then ${B}kx sync${R}"; return
+  fi
+  [[ $mode == yes ]] && { skip "pick them yourself: kx sync"; return; }
+  ask "Pick your EKS clusters now? (tick accounts, then clusters; unticked ones are skipped from now on)" || { skip "later: kx sync"; return; }
+  if "$repo/kube/bin/kx" sync </dev/tty >/dev/tty 2>&1; then ok "done ${D}(kx ignore shows what's skipped)${R}"
+  else warn "kx sync didn't finish; run it again with: kx sync"; fi
+}
+uninstall_eks_clusters() {
+  ok "your clusters stay in ~/.kube/config (kx rm <context> removes one); the skip list stays in ${kx_ignore_file/#$HOME/\~}"
+}
+
+# --------------------------------------------------------------- repos ---
+# Clones what your workspace list names (lines with a GitHub repo) that isn't there
+# yet: the layers' shared lists (layers/*/workspaces) plus your own (~/.config/ws/workspaces).
+# shellcheck source=workspaces.sh
+. "$repo/lib/workspaces.sh"
+repos_todo() {   # <path><TAB><owner/repo> for each listed repo not cloned yet
+  local p r
+  while IFS=$'\t' read -r p r; do
+    [[ -n $r && ! -e $p/.git ]] && printf '%s\t%s\n' "$p" "$r"
+  done < <(ws_list)
+}
+# ask_ws_folder NAME "<what goes there>": when the folder a workspace variable
+# names ($ACME, ...) doesn't exist yet, show where it would go and let you keep
+# that or type another (~/..., /..., or a path inside your home folder), then
+# create it and save it in your list. 0 = the folder is there now.
+ask_ws_folder() {
+  local name=$1 what=$2 cur dir
+  cur=$(ws_var "$name")
+  [[ -n $cur && -d $cur ]] && return 0
+  [[ -n $cur ]] && cur=${cur/#$HOME/\~} || cur="~/$name"
+  while :; do
+    ask_text "Folder for $what (\$$name)? Enter keeps it; type another to change it" "$cur" || { skip; return 1; }
+    dir=$ANSWER
+    [[ $dir == "~" || $dir == "~/"* ]] && dir="$HOME${dir:1}"
+    [[ $dir == /* ]] || dir="$HOME/$dir"
+    dir=$(realpath -m -- "$dir")
+    if [[ -z $ANSWER || $ANSWER == *$'\t'* ]]; then warn "that isn't a folder path"
+    elif [[ $dir == / || $dir == "$HOME" ]]; then warn "pick a folder of its own, not ${dir/#$HOME/\~}"
+    elif [[ -e $dir && ! -d $dir ]]; then warn "${dir/#$HOME/\~} is a file, not a folder"
+    elif dry; then say "      ${D}would create ${dir/#$HOME/\~} and save $name there in your list${R}"; return 0
+    elif ! mkdir -p -- "$dir" 2>/dev/null; then warn "can't create ${dir/#$HOME/\~} (no permission?)"
+    else
+      ws_set_var "$name" "$dir"
+      ok "$name → ${dir/#$HOME/\~} ${D}(saved in $(ws_list_file | sed "s|^$HOME|~|"); ws edit changes it)${R}"
+      return 0
+    fi
+    [[ $mode == yes ]] && return 1   # --yes can't ask again
+    cur=$ANSWER
+  done
+}
+
+label_repos() { echo "Workspace repos"; }
+title_repos() { echo "Clone the repos in your workspace list (ws edit) that aren't there yet"; }
+detail_repos() { echo "git clone over SSH into the folders your workspace list names; creates ~/.config/ws/workspaces"; }
+state_repos() {
+  local all todo
+  all=$(ws_list | awk -F'\t' '$2 != ""' | wc -l)
+  todo=$(repos_todo | grep -c . )
+  NOTE=""
+  if (( todo == 0 )); then STATE=installed
+  elif (( todo < all )); then STATE=partial; NOTE="$((all - todo)) of $all cloned"
+  else STATE=missing; fi
+}
+install_repos() {
+  local out p r labels=() todo=() on="" i
+  # Your own list, outside the repo (team repos included); edit it with: ws edit
+  if [[ ! -e "$(ws_list_file)" ]] && ! dry; then
+    ws_personal_init >/dev/null && ok "your workspace list: $(ws_list_file | sed "s|^$HOME|~|") ${D}(ws edit)${R}"
+  fi
+  # where each group of repos goes ($ACME, ...), asked once while its folder isn't there
+  local v vd
+  while IFS= read -r v; do
+    vd=$(ws_var "$v")
+    [[ -n $vd && ! -d $vd ]] && repos_todo | grep -q "^$vd/" && ask_ws_folder "$v" "the repos under \$$v"
+  done < <(ws_vars)
+  mapfile -t todo < <(repos_todo)
+  (( ${#todo[@]} )) || { ok "all cloned"; return; }
+  # Check GitHub SSH first: one clear message instead of a failure per repo.
+  out=$(ssh -T -o BatchMode=yes -o ConnectTimeout=8 git@github.com 2>&1)
+  if [[ $out != *"successfully authenticated"* ]]; then
+    fail "GitHub SSH auth isn't working, so skipping repos: $(head -1 <<<"$out")"
+    say "      ${D}Check: ssh -T git@github.com · then: ./install.sh repos${R}"
+    return
+  fi
+  ok "GitHub SSH works ($(grep -o 'Hi [^!]*' <<<"$out"))"
+  if dry; then
+    for i in "${todo[@]}"; do say "      ${D}would clone ${i#*$'\t'} → ${i%%$'\t'*}${R}" | sed "s|$HOME|~|"; done
+    return
+  fi
+  if [[ $mode == ask ]]; then
+    for i in "${!todo[@]}"; do
+      labels+=("$(basename "${todo[i]%%$'\t'*}")"$'\t'"${todo[i]#*$'\t'}"); on+="$i "
+    done
+    CHECKLIST_ON=$on checklist "      Missing repos (all ticked; space unticks):" "${labels[@]}" || { skip; return; }
+    local picked=(); for i in "${CHECKLIST[@]}"; do picked+=("${todo[i]}"); done
+    todo=("${picked[@]}")
+    (( ${#todo[@]} )) || { skip "nothing picked"; return; }
+  fi
+  for i in "${todo[@]}"; do
+    p=${i%%$'\t'*}; r=${i#*$'\t'}
+    if [[ -e $p ]]; then warn "$(basename "$p"): folder exists but isn't a git repo, left alone"; continue; fi
+    mkdir -p "$(dirname "$p")"
+    if git clone -q "git@github.com:$r.git" "$p" >>"$log_file" 2>&1; then ok "$(basename "$p")"
+    else warn "$(basename "$p"): couldn't clone $r (no access, or it doesn't exist); skipped"; fi
+  done
+}
+uninstall_repos() { ok "clones are your work, so they stay; delete folders yourself if you want them gone"; }
+
+# -------------------------------------------------------------- claude ---
+# Claude Code reads its config from $CLAUDE_CONFIG_DIR (shell/common.sh sets it),
+# else ~/.claude. The skill teaches Claude the toolkit; the hook hands it
+# `ctx plain` at the start of every session.
+claude_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+cs_pairs() {   # <link><TAB><skill folder>: the toolkit's skill, then each layer's
+  local d
+  for d in "$repo"/claude/skills/*/ "$repo"/layers/*/claude/skills/*/; do
+    [[ -d $d ]] && printf '%s\t%s\n' "$claude_dir/skills/$(basename "$d")" "${d%/}"
+  done
+}
+label_claude_skill() { echo "Claude skill"; }
+title_claude_skill() { echo "Claude Code knows okcli, kx, ctx and the rest, in every repo"; }
+detail_claude_skill() { echo "${claude_dir/#$HOME/\~}/skills/<name> links to claude/skills/<name> (and each layer's)"; }
+state_claude_skill() { local l t n=0 all=0; NOTE=""
+  command -v claude >/dev/null || [[ -d "$claude_dir" ]] || { STATE=n/a; NOTE="Claude Code isn't installed"; return; }
+  while IFS=$'\t' read -r l t; do (( all++ )); linked "$l" "$t" && (( n++ )); done < <(cs_pairs)
+  if (( n == all )); then STATE=installed; elif (( n )); then STATE=partial; NOTE="$n of $all skills linked"; else STATE=missing; fi; }
+install_claude_skill() { local l t
+  while IFS=$'\t' read -r l t; do
+    linked "$l" "$t" && { ok "$(basename "$l"): already linked"; continue; }
+    [[ -e "$l" && ! -L "$l" ]] && { warn "${l/#$HOME/\~} exists and isn't a link; left alone"; continue; }
+    ask "Teach Claude Code the $(basename "$l") skill? (in ${claude_dir/#$HOME/\~}/skills)" && { dry || link_file "$l" "$t"; } || skip
+  done < <(cs_pairs); }
+uninstall_claude_skill() { local l t; while IFS=$'\t' read -r l t; do unlink_file "$l" "$t"; done < <(cs_pairs); }
+
+# The hook is the one SessionStart entry whose command is $ch_cmd. settings.json
+# is edited as JSON (python), everything else in it is kept as is.
+ch_settings="$claude_dir/settings.json"
+ch_cmd="ctx plain 2>/dev/null || true"
+ch_json() {   # ch_json has|add|remove  (add/remove print the new settings)
+  python3 -I - "$ch_settings" "$ch_cmd" "$1" <<'PY'
+import json, os, sys
+path, cmd, op = sys.argv[1:]
+d = json.load(open(path)) if os.path.exists(path) and os.path.getsize(path) else {}
+ss = d.setdefault("hooks", {}).setdefault("SessionStart", [])
+mine = lambda g: any(h.get("command") == cmd for h in g.get("hooks", []))
+if op == "has":
+    sys.exit(0 if any(mine(g) for g in ss) else 1)
+ss[:] = [g for g in ss if not mine(g)]
+if op == "add":
+    ss.append({"hooks": [{"type": "command", "command": cmd, "timeout": 10}]})
+if not ss: del d["hooks"]["SessionStart"]
+if not d["hooks"]: del d["hooks"]
+print(json.dumps(d, indent=2))
+PY
+}
+ch_write() {   # ch_write add|remove
+  local tmp b; tmp=$(mktemp)
+  ch_json "$1" >"$tmp" || { rm -f "$tmp"; fail "couldn't read ${ch_settings/#$HOME/\~} (not valid JSON?)"; return 1; }
+  mkdir -p "$claude_dir"; b=$(backup "$ch_settings")
+  cat "$tmp" >"$ch_settings"; rm -f "$tmp"
+  logf "  $1 SessionStart hook in $ch_settings${b:+ (backup: $b)}"
+  ok "done${b:+ (backup: ${b/#$HOME/\~})}"
+}
+label_claude_hook() { echo "Claude start hook"; }
+title_claude_hook() { echo "Every Claude Code session starts knowing your AWS profile, pin and cluster"; }
+detail_claude_hook() { echo "a SessionStart hook in ${ch_settings/#$HOME/\~} that runs: $ch_cmd"; }
+state_claude_hook() { NOTE=""
+  command -v claude >/dev/null || [[ -d "$claude_dir" ]] || { STATE=n/a; NOTE="Claude Code isn't installed"; return; }
+  if ch_json has 2>/dev/null; then STATE=installed; else STATE=missing; fi; }
+install_claude_hook() { ch_json has 2>/dev/null && { ok "already there"; return; }
+  ask "Add the start hook to ${ch_settings/#$HOME/\~}? (runs ${C}ctx plain${R} when a session opens)" && { dry || ch_write add; } || skip; }
+uninstall_claude_hook() { ch_json has 2>/dev/null || { ok "not there"; return 0; }; ch_write remove; }
+
+# -------------------------------------------------------------- layers ---
+# Each layer's own components (lib/layers.sh), after the toolkit's.
+# shellcheck source=layers.sh
+. "$repo/lib/layers.sh"
+while IFS= read -r _layer; do
+  # shellcheck disable=SC1090
+  [[ -r $_layer/components.sh ]] && . "$_layer/components.sh"
+done < <(layer_dirs "$repo")
+unset _layer

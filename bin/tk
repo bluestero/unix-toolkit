@@ -1,0 +1,307 @@
+#!/usr/bin/env bash
+# tk - the work toolkit's front door: find, run, check, set up and update every
+# toolkit command from anywhere. `tk help` lists the commands.
+#
+# The picker hands the chosen command back to your shell (shell/tk.sh) instead of
+# running it here, so commands that change this terminal (okcli, kx) still can.
+
+set -uo pipefail
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
+# shellcheck source=../lib/ui.sh
+. "$ROOT/lib/ui.sh"
+UI_EVAL_FILE="${TK_EVAL_FILE:-}"
+S=$'\x1f'
+
+# Every toolkit command: name | group | what it does | program it needs (if any)
+TOOLS=(
+  "ctx|Where am I|AWS, Kubernetes and Twingate for this terminal|"
+  "okcli|Cloud|Okta AWS profiles: switch, refresh, default, folder pins|okta-aws-cli"
+  "kx|Cloud|Kubernetes contexts and namespaces, per terminal|kubectl"
+  "twin|Cloud|Twingate exit nodes|twingate"
+  "ws|Editor|open workspaces (repos) in your IDE|"
+  "k-bg|Kitty|background image, brightness, opacity, accent colours|kitty"
+  "k-theme|Kitty|colour theme with live preview; Mine / All tabs|kitty"
+  "k-icon|Kitty|kitty's app icon|kitty"
+  "k-config|Kitty|edit kitty.conf|kitty"
+)
+# plus each layer's commands (layers/<name>/tools, same format)
+# shellcheck source=../lib/layers.sh
+. "$ROOT/lib/layers.sh"
+while IFS= read -r _l; do
+  [[ -r $_l/tools ]] || continue
+  while IFS= read -r _t; do [[ -z $_t || $_t == \#* ]] || TOOLS+=("$_t"); done <"$_l/tools"
+done < <(layer_dirs "$ROOT")
+unset _l _t
+field() { cut -d'|' -f"$2" <<<"$1"; }
+
+# "✓ ready" or why not
+ready() {
+  local name; name=$(field "$1" 1)
+  local need; need=$(field "$1" 4)
+  command -v "$name" >/dev/null || { printf '%s' "${C_YELLOW}not on PATH${C_RESET}  $(ui_hint './install.sh commands')"; return 1; }
+  [[ -z "$need" ]] || command -v "$need" >/dev/null || { printf '%s' "${C_YELLOW}needs $need${C_RESET}"; return 1; }
+  printf '%s' "${C_GREEN}✓ ready${C_RESET}"
+}
+
+# -------------------------------------------------------------------- ls ---
+cmd_ls() {
+  [[ -t 1 ]] || ui_no_color
+  local t prev="" g n=0 bad=0 st
+  {
+    printf '%s\n' "${C_BOLD}COMMAND${C_RESET}$S${C_BOLD}WHAT IT DOES${C_RESET}$S${C_BOLD}READY${C_RESET}"
+    for t in "${TOOLS[@]}"; do
+      g=$(field "$t" 2)
+      if [[ "$g" != "$prev" ]]; then [[ -n "$prev" ]] && printf '\n'; printf '%s\n' "$C_DIM$g$C_RESET"; prev=$g; fi
+      st=$(ready "$t") || bad=$((bad + 1))
+      printf '%s\n' "  $C_CYAN$(field "$t" 1)$C_RESET$S$(field "$t" 3)$S$st"
+    done
+  } | ui_table "tk · work toolkit" "${#TOOLS[@]} commands" "$(ui_hint '<command> help for each one')"
+}
+
+# ---------------------------------------------------------------- picker ---
+cmd_pick() {
+  if [[ ! -t 0 || ! -t 1 ]] || ! command -v fzf >/dev/null; then cmd_ls; return; fi
+  local t rows="COMMAND${S}AREA${S}WHAT IT DOES"$'\n' sel
+  for t in "${TOOLS[@]}"; do
+    rows+="$(field "$t" 1)$S${C_DIM}$(field "$t" 2)${C_RESET}$S$(field "$t" 3)"$'\n'
+  done
+  sel=$(printf '%s' "$rows" | ui_fzf 'tk · work toolkit' --sortable --header-lines=1 --prompt='command> ' \
+    --header='enter: run it · esc: cancel') || return 0
+  sel=$(strip_ansi "$sel"); sel=${sel%% *}
+  [[ -n "$sel" ]] || return 0
+  # run it in the calling shell (so okcli / kx can change this terminal)
+  emit_eval "$sel" || exec "$sel"
+}
+
+# ---------------------------------------------------------------- status ---
+# Which installer components are in place: "installed total partial-names"
+toolkit_state() {
+  (
+    repo=$ROOT mode=dry details=0
+    # shellcheck source=../lib/setup.sh
+    . "$ROOT/lib/setup.sh" >/dev/null 2>&1
+    # shellcheck source=../lib/components.sh
+    . "$ROOT/lib/components.sh" >/dev/null 2>&1
+    local id n=0 total=0 left=""
+    for id in "${COMPONENTS[@]}"; do
+      "$(fn state "$id")" >/dev/null 2>&1
+      [[ "$STATE" == n/a ]] && continue
+      total=$((total + 1))
+      if [[ "$STATE" == installed ]]; then n=$((n + 1)); else left+="$id "; fi
+    done
+    printf '%s %s %s\n' "$n" "$total" "$left"
+  )
+}
+
+cmd_status() {
+  "$ROOT/bin/ctx"
+  [[ -t 1 ]] || ui_no_color
+  local n total left setup update
+  read -r n total left < <(toolkit_state)
+  if [[ -z "$left" ]]; then setup="${C_GREEN}all $total parts set up${C_RESET}"
+  else setup="${C_YELLOW}$n of $total parts set up${C_RESET}  $(ui_hint "tk install ${left% }")"; fi
+  if git -C "$ROOT" rev-parse >/dev/null 2>&1; then update="$(version) ${C_DIM}($(git_rev))${C_RESET}  $(ui_hint 'tk update')"
+  else update="${C_DIM}not a git repo, so no updates${C_RESET}"; fi
+  printf 'folder\t%s\nset up\t%s\nversion\t%s\n' "${ROOT/#$HOME/\~}" "$setup" "$update" | ui_fields "tk · toolkit"
+}
+
+# ---------------------------------------------------------------- doctor ---
+# Every check in one box: one line per tool when all is well, the problems
+# (with their fix) when not.
+declare -A OKS=() PROBLEMS=()
+ORDER=()
+check() {  # check <tool> <ok|bad> <text> [fix]
+  [[ " ${ORDER[*]} " == *" $1 "* ]] || ORDER+=("$1")
+  if [[ "$2" == ok ]]; then OKS[$1]=$(( ${OKS[$1]:-0} + 1 ))
+  else PROBLEMS[$1]+="$3${4:+  $(ui_hint "$4")}"$'\n'; fi
+}
+from_doctor() {  # a tool's own "✓ x" / "! x — fix" lines
+  local tool=$1 line text
+  while IFS= read -r line; do
+    case "$line" in
+      "✓ "*) check "$tool" ok "${line#✓ }" ;;
+      "! "*) text=${line#! }
+             if [[ "$text" == *" — "* ]]; then check "$tool" bad "${text%% — *}" "${text#* — }"
+             else check "$tool" bad "$text"; fi ;;
+    esac
+  done < <("$tool" doctor 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
+}
+
+cmd_doctor() {
+  [[ -t 1 ]] || ui_no_color
+  local tool need t n total left bad=0 rows="" p first
+  for tool in okcli kx; do command -v "$tool" >/dev/null && from_doctor "$tool"; done
+  if ! command -v twingate >/dev/null; then check twin bad "twingate isn't installed"
+  elif [[ "$(twingate status -d 2>/dev/null | head -n1)" == online ]]; then check twin ok "connected"
+  else check twin bad "Twingate isn't connected" "open the Twingate app"; fi
+  for t in "${TOOLS[@]}"; do
+    tool=$(field "$t" 1); need=$(field "$t" 4)
+    [[ " okcli kx twin " == *" $tool "* ]] && continue
+    if ! command -v "$tool" >/dev/null; then check "$tool" bad "not on PATH" "tk install commands"
+    elif [[ -n "$need" ]] && ! command -v "$need" >/dev/null; then check "$tool" bad "needs $need"
+    else check "$tool" ok ready; fi
+  done
+  if [[ -n "${KX_SHELL:-}" && -n "${OKCLI_SHELL:-}" ]]; then check tk ok "shell hooks"
+  else check tk bad "shell hooks aren't loaded" "tk install bash"; fi
+  command -v fzf >/dev/null && check tk ok fzf || check tk bad "fzf isn't installed (the pickers need it)"
+  read -r n total left < <(toolkit_state)
+  if [[ -z "$left" ]]; then check tk ok parts
+  else check tk bad "$n of $total installer parts set up" "tk install ${left% }"; fi
+
+  for tool in "${ORDER[@]}"; do
+    if [[ -z "${PROBLEMS[$tool]:-}" ]]; then
+      n=${OKS[$tool]}
+      rows+="$C_CYAN$tool$C_RESET$S${C_GREEN}✓${C_RESET} $( (( n > 1 )) && echo "all $n checks pass" || echo ok)"$'\n'
+      continue
+    fi
+    first="$C_CYAN$tool$C_RESET"
+    while IFS= read -r p; do
+      [[ -n "$p" ]] || continue
+      rows+="$first$S${C_YELLOW}!${C_RESET} $p"$'\n'; first=""; bad=$((bad + 1))
+    done <<<"${PROBLEMS[$tool]}"
+    n=${OKS[$tool]:-0}
+    (( n == 1 )) && rows+="$S${C_DIM}1 other check passes${C_RESET}"$'\n'
+    (( n > 1 )) && rows+="$S${C_DIM}$n other checks pass${C_RESET}"$'\n'
+  done
+
+  local foot; (( bad )) && foot="${C_YELLOW}$bad to fix${C_RESET}" || foot="${C_GREEN}all good${C_RESET}"
+  printf '%s' "$rows" | { if [[ -t 1 ]]; then print_table 3 | ui_box "tk doctor" "" 0 "$foot"; else print_table 3; fi; }
+  (( bad == 0 ))
+}
+
+# --------------------------------------------------------------- version ---
+# The VERSION file holds the release number (bump it when pushing a change the
+# team will notice); git adds the exact commit.
+version() { tr -d '[:space:]' <"$ROOT/VERSION" 2>/dev/null || printf 'unknown'; }
+git_rev() { git -C "$ROOT" log -1 --format="%h, %cs" 2>/dev/null; }
+
+cmd_version() {
+  local rev; rev=$(git_rev)
+  printf 'tk %s%s\n' "$(version)" "${rev:+  $C_DIM($rev)$C_RESET}"
+}
+
+# ---------------------------------------------------------------- update ---
+# <dir> is a git clone of its own (a layer copied in by hand is part of nothing,
+# and git would otherwise answer for the toolkit repo around it)
+own_repo() { [[ "$(git -C "$1" rev-parse --show-toplevel 2>/dev/null)" == "$(cd "$1" && pwd -P)" ]]; }
+
+# pull_one <dir> <name>: pull it, say what changed; returns 0 if anything did
+pull_one() {
+  local before
+  before=$(git -C "$1" rev-parse HEAD)
+  git -C "$1" pull --ff-only -q || { warn "$2: git pull failed (output above); left as it was"; return 1; }
+  [[ "$(git -C "$1" rev-parse HEAD)" == "$before" ]] && { ok "$2: already up to date"; return 1; }
+  ok "$2: updated"
+  git -C "$1" log --no-merges --format='  • %s' "$before..HEAD" | head -n 20 >&2
+}
+
+cmd_update() {
+  own_repo "$ROOT" ||
+    die "the toolkit folder (${ROOT/#$HOME/\~}) isn't a git repo, so there's nothing to update from"
+  local old new changed=0 d
+  old=$(version)
+  pull_one "$ROOT" "toolkit" && changed=1
+  new=$(version)
+  [[ "$new" != "$old" ]] && ok "tk $old → ${C_BOLD}$new${C_RESET}"
+  while IFS= read -r d; do
+    own_repo "$d" || continue
+    pull_one "$d" "layer $(basename "$d")" && changed=1
+  done < <(layer_dirs "$ROOT")
+  (( changed )) || return 0
+  info "${C_DIM}Checking for new parts to set up…${C_RESET}"
+  "$ROOT/install.sh"
+}
+
+# ---------------------------------------------------------------- layers ---
+# Extra parts from other repos, in layers/<name>/ (lib/layers.sh says what a
+# layer can hold). tk layer add clones one; copying a folder there works too.
+layer_ls() {
+  [[ -t 1 ]] || ui_no_color
+  local d n=0 from ver rows="${C_BOLD}LAYER${C_RESET}$S${C_BOLD}FROM${C_RESET}$S${C_BOLD}VERSION${C_RESET}"$'\n'
+  while IFS= read -r d; do
+    n=$((n + 1))
+    if own_repo "$d"; then
+      from=$(git -C "$d" remote get-url origin 2>/dev/null || echo "a git repo with no remote")
+      ver=$(git -C "$d" log -1 --format='%h, %cs' 2>/dev/null)
+    else from="${C_DIM}a copied folder (no updates)${C_RESET}"; ver="–"; fi
+    rows+="  $C_CYAN$(basename "$d")$C_RESET$S$from$S$ver"$'\n'
+  done < <(layer_dirs "$ROOT")
+  (( n )) || { info "No layers yet. Add one: tk layer add <git-url>"; return 0; }
+  printf '%s' "$rows" | ui_table "tk · layers" "$n layer$( (( n > 1 )) && echo s)" "$(ui_hint 'tk layer add <git-url> · tk layer rm <name>')"
+}
+
+layer_add() {
+  local url=${1:-} name dir
+  [[ -n $url ]] || die "which repo? tk layer add <git-url> [name]   e.g. git@github.com:me/acme-toolkit.git"
+  name=${2:-$(basename "${url%.git}")}; name=${name%-toolkit}
+  dir="$ROOT/layers/$name"
+  [[ -e $dir ]] && die "layers/$name is already there (tk layer ls)"
+  mkdir -p "$ROOT/layers"
+  git clone -q "$url" "$dir" || die "couldn't clone $url (no access? check: ssh -T git@github.com)"
+  ok "layer $name added: ${dir/#$HOME/\~}"
+  info "${C_DIM}Its commands and settings load in new terminals.${C_RESET}"
+  confirm "Set up its parts now?" y && exec "$ROOT/install.sh"
+  info "Later: tk install"
+}
+
+layer_rm() {
+  local name=${1:-} dir
+  [[ -n $name ]] || die "which layer? tk layer rm <name>   (tk layer ls)"
+  dir="$ROOT/layers/$name"
+  [[ -d $dir ]] || die "there's no layer $name (tk layer ls)"
+  if own_repo "$dir"; then
+    if [[ -n $(git -C "$dir" status --porcelain) ]] || ! git -C "$dir" rev-parse '@{u}' >/dev/null 2>&1 ||
+       [[ -n $(git -C "$dir" log --oneline '@{u}..') ]]; then
+      die "layers/$name has work that isn't pushed (uncommitted, or commits not on its remote). Push it first, or delete the folder yourself."
+    fi
+  else
+    warn "layers/$name isn't a git clone, so deleting it can't be undone"
+  fi
+  info "${C_DIM}Parts it set up stay set up; to remove them first: tk uninstall${C_RESET}"
+  confirm "Remove the $name layer (delete ${dir/#$HOME/\~})?" n || { info "Kept."; return 0; }
+  rm -rf "$dir" && ok "layer $name removed · open a new terminal"
+}
+
+cmd_layer() {
+  case "${1:-ls}" in
+    ls|list)    layer_ls ;;
+    add)        shift; layer_add "$@" ;;
+    rm|remove)  shift; layer_rm "$@" ;;
+    *)          ui_unknown "tk layer" "$1" ;;
+  esac
+}
+
+cmd_help() {
+  ui_help tk "the work toolkit" <<'EOF'
+## Commands
+tk	picker of every toolkit command; enter runs it
+tk ls	every toolkit command, what it does, whether it's ready
+tk status	ctx, plus how much of the toolkit is set up
+tk doctor	every check from every tool, in one box
+tk install [part...]	./install.sh from anywhere	tk install zsh
+tk uninstall [part...]	./uninstall.sh from anywhere
+tk update	pull the latest toolkit and layers, show what changed, set up anything new	needs a git repo
+tk layer [ls]	the layers: extra parts from other repos, in layers/<name>
+tk layer add <git-url> [name]	clone a layer, then offer to set up its parts	name: repo name without -toolkit
+tk layer rm <name>	delete a layer (only when nothing in it is unpushed)
+tk version	the toolkit version (also -v, --version)
+tk help	this page
+
+Every command speaks the same words: ls, status, current, default, off, doctor, help.
+EOF
+}
+
+case "${1:-}" in
+  "")             cmd_pick ;;
+  ls|list)        cmd_ls ;;
+  st|status)      cmd_status ;;
+  doctor)         cmd_doctor ;;
+  install)        shift; exec "$ROOT/install.sh" "$@" ;;
+  uninstall)      shift; exec "$ROOT/uninstall.sh" "$@" ;;
+  update)         cmd_update ;;
+  layer|layers)   shift; cmd_layer "$@" ;;
+  version|-v|--version) cmd_version ;;
+  help|-h|--help) cmd_help ;;
+  *)              ui_unknown tk "$1" ;;
+esac

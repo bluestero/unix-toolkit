@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# k-power: rofi's "power" tab (script mode, started by k-launch). Lock, suspend and
+# hibernate run at once; log out, restart and shut down ask first, with "No" on top
+# so a stray Enter does nothing.
+set -uo pipefail
+run() { setsid -f "$@" >/dev/null 2>&1; }   # detached, so rofi can close right away
+
+menu() {
+  printf '\0prompt\x1fpower\n\0no-custom\x1ftrue\n'
+  printf '%s\0icon\x1f%s\n' \
+    "Lock" system-lock-screen \
+    "Suspend" system-suspend \
+    "Hibernate" system-hibernate \
+    "Log out" system-log-out \
+    "Restart" system-reboot \
+    "Shut down" system-shutdown
+}
+ask() {  # ask <verb>
+  printf '\0prompt\x1f%s?\n\0no-custom\x1ftrue\n' "$1"
+  printf 'No, go back\n'
+  printf 'Yes, %s\n' "$1"
+}
+
+case "${1:-}" in
+  "")                    menu ;;
+  "Lock")                run loginctl lock-session ;;
+  "Suspend")             run systemctl suspend ;;
+  "Hibernate")           run systemctl hibernate ;;
+  "Log out")             ask "log out" ;;
+  "Restart")             ask "restart" ;;
+  "Shut down")           ask "shut down" ;;
+  "Yes, log out")        run gnome-session-quit --logout --no-prompt ;;
+  "Yes, restart")        run systemctl reboot ;;
+  "Yes, shut down")      run systemctl poweroff ;;
+  *)                     menu ;;
+esac

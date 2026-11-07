@@ -1,0 +1,47 @@
+/* Rofi launcher, minimal. Alt+Space: open windows + apps, Alt+Shift+Space: ssh, Super+X: power, Super+S: speaker / mic / wifi / bluetooth. (Modes are set in rofi/bin/k-launch.)
+   Inside it: Right / Ctrl+Tab next mode, Left / Ctrl+Shift+Tab previous (Ctrl+b / Ctrl+f move the text cursor) (apps, ssh, files, power, or speaker, mic, wifi, bluetooth; the name shows before the search), Esc closes, Enter opens, Ctrl+j/k or arrows move.
+   Colours come from colors.rasi, written by k-rofi whenever k-theme or k-bg change. */
+@import "colors.rasi"
+configuration {
+    font: "JetBrainsMono Nerd Font 10";
+    terminal: "kitty";
+    show-icons: true;
+    sorting-method: "fzf";
+    sort: true;
+    kb-mode-next: "Right,Shift+Right,Control+Tab";
+    kb-mode-previous: "Left,Shift+Left,Control+ISO_Left_Tab";
+    kb-move-char-back: "Control+b";
+    kb-move-char-forward: "Control+f";
+    kb-remove-word-back: "Control+Alt+h,Control+BackSpace,Alt+BackSpace";
+    display-ssh: "ssh";
+    display-filebrowser: "files";
+    display-power: "power";
+}
+
+* {
+    background-color: transparent;
+    text-color: @fg;
+}
+
+window {
+    location: center;
+    width: 560px;
+    background-color: @bg;
+    border: 1px;
+    border-color: @line;
+    border-radius: 12px;
+    padding: 14px;
+}
+
+mainbox   { children: [inputbar, listview]; spacing: 10px; }
+inputbar  { padding: 6px 8px 10px 8px; spacing: 10px; children: [prompt, entry]; border: 0 0 1px 0; border-color: @line; }
+prompt    { text-color: @accent; }
+entry     { text-color: @fg; placeholder: "type to search"; placeholder-color: @grey; }
+
+listview  { lines: 7; fixed-height: true; scrollbar: false; spacing: 2px; }
+
+element   { padding: 7px 8px; spacing: 12px; border-radius: 8px; }
+element normal.normal, element alternate.normal { background-color: transparent; text-color: @fg; }
+element selected.normal { background-color: @sel; text-color: @accent; }
+element-icon { size: 22px; }
+element-text { vertical-align: 0.5; text-color: inherit; }

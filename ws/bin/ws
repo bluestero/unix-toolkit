@@ -1,0 +1,347 @@
+#!/usr/bin/env bash
+# ws - open workspaces (repos and folders) in your IDE. `ws help` lists the commands.
+#
+# The folders come from your list (~/.config/ws/workspaces, `ws edit`), which can
+# include your layers' shared lists (@<layer> lines). Already-open ones get focused, never
+# opened twice. WS_EDITOR overrides the default IDE once.
+
+set -uo pipefail
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+ROOT="$(cd "$(dirname "$SELF")/../.." && pwd)"
+# shellcheck source=../../lib/ui.sh
+. "$ROOT/lib/ui.sh"
+# shellcheck source=../../lib/workspaces.sh
+. "$ROOT/lib/workspaces.sh"
+
+CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/ws"
+IDE_CONF="$CONF_DIR/ide"
+ZED_DB="${XDG_DATA_HOME:-$HOME/.local/share}/zed/db/0-stable/db.sqlite"
+S=$'\x1f'
+T=$'\t'
+
+# id | command | process name | label
+IDES=(
+  "zed|zed|zed-editor|Zed"
+  "code|code|code|VS Code"
+  "cursor|cursor|cursor|Cursor"
+  "windsurf|windsurf|windsurf|Windsurf"
+  "idea|idea|idea|IntelliJ IDEA"
+  "pycharm|pycharm|pycharm|PyCharm"
+)
+ide_field() { local e; for e in "${IDES[@]}"; do [[ ${e%%|*} == "$1" ]] && { cut -d'|' -f"$2" <<<"$e"; return; }; done; }
+ide_ids() { local e; for e in "${IDES[@]}"; do echo "${e%%|*}"; done; }
+ide_known() { [[ -n "$(ide_field "$1" 1)" ]]; }
+ide_installed() { command -v "$(ide_field "$1" 2)" >/dev/null 2>&1; }
+installed_ides() { local i; for i in $(ide_ids); do ide_installed "$i" && echo "$i"; done; }
+
+default_ide() {
+  local i="${WS_EDITOR:-}"
+  [[ -z "$i" && -r "$IDE_CONF" ]] && i=$(<"$IDE_CONF")
+  ide_known "${i:-}" && echo "$i" || echo zed
+}
+
+# ----------------------------------------------------------- workspaces ---
+expand() { local p="$1"; [[ $p == "~"* ]] && p="$HOME${p:1}"; printf '%s' "${p%/}"; }
+tilde() { printf '%s' "${1/#$HOME/\~}"; }
+
+# name<TAB>path for each listed folder that exists.
+entries() {
+  local p _
+  while IFS="$T" read -r p _; do
+    [[ -d $p ]] && printf '%s\t%s\n' "$(basename "$p")" "$p"
+  done < <(ws_list)
+}
+
+# Look up a workspace by name (case-insensitive); prints its entry line.
+find_entry() {
+  awk -F'\t' -v q="${1,,}" 'tolower($1) == q { print; exit }' <<<"$ENTRIES"
+}
+
+# ------------------------------------------------------- open detection ---
+# Working dirs of everything the IDE has spawned (terminals, language servers):
+# a live sign of which folders have a window right now.
+ide_child_cwds() {
+  local roots
+  roots=$(pgrep -x "$1" | tr '\n' ' ')
+  [[ -n "$roots" ]] || return 0
+  ps -eo pid=,ppid= | awk -v roots="$roots" '
+    { parent[$1] = $2 }
+    END {
+      n = split(roots, r, " "); for (i = 1; i <= n; i++) keep[r[i]] = 1
+      for (p in parent) { q = p; for (d = 0; d < 20 && q > 1; d++) { if (q in keep) { print p; break } q = parent[q] } }
+    }' | while read -r p; do readlink "/proc/$p/cwd" 2>/dev/null; done | sort -u
+}
+
+# Zed's own record of open workspaces. It lags a little and is per folder, not
+# per window, so it is only used alongside the live check above.
+zed_db_open() {
+  [[ -r "$ZED_DB" ]] || return 0
+  python3 -I - "$ZED_DB" <<'PY' 2>/dev/null
+import sqlite3, sys
+c = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+row = c.execute("select value from kv_store where key = 'session_id'").fetchone()
+if row:
+    for (paths,) in c.execute("select paths from workspaces where session_id = ?", (row[0],)):
+        print(*[p for p in (paths or "").split("\n") if p], sep="\n")
+PY
+}
+
+# Window Calls (GNOME extension): exact window list, focus and close.
+WC=(gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/Shell/Extensions/Windows)
+wc_ok() { "${WC[@]}" --method org.gnome.Shell.Extensions.Windows.List >/dev/null 2>&1; }
+
+# name<TAB>window-id for the IDE's windows whose title names a workspace
+# (Zed: "daas — file.py", VS Code: "file.py - daas - Visual Studio Code").
+wc_windows() {
+  local pids
+  pids=$(pgrep -x "$(ide_field "$1" 3)" | paste -sd,)
+  [[ -n $pids ]] || return 0
+  "${WC[@]}" --method org.gnome.Shell.Extensions.Windows.List 2>/dev/null |
+    python3 -I -c '
+import ast, json, re, sys
+pids = {int(p) for p in sys.argv[1].split(",")}
+names = [n for n in sys.argv[2].split("\n") if n]
+raw = sys.stdin.read().strip()
+wins = json.loads(ast.literal_eval(raw)[0]) if raw else []
+for w in wins:
+    if w.get("pid") not in pids:
+        continue
+    parts = [x.strip() for x in re.split(r" [\u2014\u2013-] ", w.get("title") or "")]
+    for n in names:
+        if n in parts:
+            print(n + "\t" + str(w["id"]))
+            break
+' "$pids" "$(cut -f1 <<<"$ENTRIES")"
+}
+
+# Names of workspaces open in the given IDE. The window list is exact, so it is
+# used alone when available: the IDE keeps language servers and shells alive
+# after a window closes, and their working dirs would keep it marked open.
+# Without it, fall back to those working dirs + Zed's DB (a dir counts for the
+# deepest workspace containing it).
+open_names() {
+  local proc; proc=$(ide_field "$1" 3)
+  pgrep -x "$proc" >/dev/null 2>&1 || return 0
+  if wc_ok; then wc_windows "$1" | cut -f1 | sort -u; return; fi
+  { ide_child_cwds "$proc"; [[ $1 == zed ]] && zed_db_open; } |
+    awk -F'\t' 'NR == FNR { name[$2] = $1; next }
+      { best = ""; for (p in name) if (($0 == p || index($0, p "/") == 1) && length(p) > length(best)) best = p
+        if (best != "") print name[best] }' <(printf '%s\n' "$ENTRIES") - | sort -u
+}
+
+is_open() { grep -Fxq "$1" <<<"$OPEN"; }
+
+# ----------------------------------------------------------------- rows ---
+# full path
+ws_info() { printf '%s' "${C_DIM}$(tilde "$1")${C_RESET}"; }
+
+# name<S>shown name (● when open)<S>info
+rows() {
+  local name path
+  while IFS="$T" read -r name path; do
+    [[ -n $name ]] || continue
+    if is_open "$name"; then printf '%s\n' "$name$S$(ui_mark_here) $C_GREEN$C_BOLD$name$C_RESET$S$(ws_info "$path")"
+    else printf '%s\n' "$name$S  $name$S$(ws_info "$path")"; fi
+  done <<<"$ENTRIES"
+}
+
+# ----------------------------------------------------------------- open ---
+open_one() {
+  local q="$1" ide="$2" e name path cmd
+  e=$(find_entry "$q")
+  [[ -n $e ]] || { warn "No workspace '$q' · see: ws ls  (add it: ws edit)"; return 1; }
+  IFS="$T" read -r name path <<<"$e"
+  cmd=$(ide_field "$ide" 2)
+  ide_installed "$ide" || die "$(ide_field "$ide" 4) isn't installed ($cmd not found) · see: ws default"
+  local wid
+  if is_open "$name" && wc_ok && wid=$(wc_windows "$ide" | awk -F'\t' -v n="$name" '$1 == n { print $2; exit }') && [[ -n $wid ]]; then
+    "${WC[@]}" --method org.gnome.Shell.Extensions.Windows.Activate "$wid" >/dev/null 2>&1
+    ok "$name (already open, focused)"; return
+  fi
+  case "$ide" in
+    zed)
+      # -e jumps to the window that already has the folder; -n makes a new one.
+      # (Plain `zed <dir>` follows cli_default_open_behavior, which may duplicate.)
+      if is_open "$name"; then zed -e "$path" >/dev/null 2>&1; ok "$name (already open, focused)"
+      else zed -n "$path" >/dev/null 2>&1; ok "$name → Zed"; fi ;;
+    *)
+      # VS Code family and JetBrains focus an already-open folder themselves.
+      "$cmd" "$path" >/dev/null 2>&1 &
+      disown 2>/dev/null
+      if is_open "$name"; then ok "$name (already open, focused)"; else ok "$name → $(ide_field "$ide" 4)"; fi ;;
+  esac
+}
+
+open_many() {
+  local ide="$1" q rc=0; shift
+  (( $# )) || { info "Usage: ws <name>...  (see: ws ls)"; return 1; }
+  OPEN=$(open_names "$ide")
+  for q in "$@"; do open_one "$q" "$ide" || rc=1; done
+  return $rc
+}
+
+# ---------------------------------------------------------------- close ---
+# Close the IDE windows of the named workspaces (like clicking x, so unsaved
+# work still gets its prompt).
+close_many() {
+  local ide="$1" q e name wins wid w rc=0; shift
+  (( $# )) || { info "Usage: ws close <name>..."; return 1; }
+  if ! wc_ok; then
+    warn "Closing windows needs the Window Calls extension."
+    [[ -t 0 ]] && confirm "Install it now?" && "$ROOT/install.sh" window-calls
+    return 1
+  fi
+  wins=$(wc_windows "$ide")
+  for q in "$@"; do
+    e=$(find_entry "$q"); name=${e%%"$T"*}
+    [[ -n $e ]] || { warn "No workspace '$q'."; rc=1; continue; }
+    wid=$(awk -F'\t' -v n="$name" '$1 == n { print $2 }' <<<"$wins")
+    [[ -n $wid ]] || { info "$name isn't open in $(ide_field "$ide" 4)"; continue; }
+    for w in $wid; do "${WC[@]}" --method org.gnome.Shell.Extensions.Windows.Close "$w" >/dev/null 2>&1; done
+    ok "$name closed"
+  done
+  return $rc
+}
+
+# ------------------------------------------------------------------ ide ---
+# `ws default`: the IDEs, ◆ on the one ws opens in.
+ide_ls() {
+  local i d name note h; d=$(default_ide)
+  [[ -t 1 ]] || ui_no_color
+  h() { printf '%s' "$C_BOLD$1$C_RESET"; }
+  {
+    printf '%s\n' "  $(h IDE)$S$(h NAME)$S"
+    for i in $(ide_ids); do
+      name="  $i"; [[ $i == "$d" ]] && name="  $C_BOLD$i$C_RESET $(ui_mark_default)"
+      if ide_installed "$i"; then note=""; else note="${C_DIM}not installed${C_RESET}"; fi
+      printf '%s\n' "$name$S$(ide_field "$i" 4)$S$note"
+    done
+  } | ui_table "ws · IDEs" "$(ui_legend default)"
+  [[ -n "${WS_EDITOR:-}" ]] && info "${C_DIM}WS_EDITOR=$WS_EDITOR wins in this terminal.${C_RESET}"
+  return 0
+}
+
+ide_default() {
+  local i="$1"
+  ide_known "$i" || die "unknown IDE '$i' · see: ws default"
+  ide_installed "$i" || warn "$(ide_field "$i" 4) isn't installed yet; saving anyway."
+  mkdir -p "$CONF_DIR" && echo "$i" >"$IDE_CONF"
+  ok "Default IDE → $(ide_field "$i" 4)"
+  [[ -n "${WS_EDITOR:-}" ]] && warn "WS_EDITOR=$WS_EDITOR is set and still wins in this terminal."
+  return 0
+}
+
+# --------------------------------------------------------------- picker ---
+# Picker rows for one IDE: a header line, then workspaces. Column 1 (hidden) is the plain name.
+picker_rows() {
+  local ide="$1" i n=0 act=0 tabs name path
+  local -a labels=()
+  for i in $(installed_ides); do
+    [[ $i == "$ide" ]] && act=$n
+    labels+=("$(ide_field "$i" 4)"); n=$((n + 1))
+  done
+  # the header line: the IDE tabs (←→ to change) with the keys you can't guess
+  tabs=$(ui_tabs "$act" "${labels[@]}")
+  printf '\t%s\n' "$tabs     ${C_KEY}←→${C_RESET} ${C_WORD}IDE${C_RESET}   ${C_KEY}tab${C_RESET} ${C_WORD}tick${C_RESET}   ${C_KEY}ctrl-x${C_RESET} ${C_WORD}close${C_RESET}"
+  OPEN=$(open_names "$ide")
+  # rows: just the name, ● and green when open (paths: ws ls)
+  while IFS="$T" read -r name path; do
+    [[ -n $name ]] || continue
+    if is_open "$name"; then printf '%s\t%s\n' "$name" "$(ui_mark_here) $C_GREEN$C_BOLD$name$C_RESET"
+    else printf '%s\t%s\n' "$name" "  $name"; fi
+  done <<<"$ENTRIES"
+}
+
+# ←/→ in the picker: step through installed IDEs, remembered in a temp file.
+cycle() {
+  local f="$1" step="$2" cur list n i
+  cur=$(<"$f"); mapfile -t list < <(installed_ides); n=${#list[@]}
+  for i in "${!list[@]}"; do [[ ${list[$i]} == "$cur" ]] && break; done
+  [[ ${list[$i]:-} == "$cur" ]] || i=0
+  cur=${list[$(( (i + step + n) % n ))]}
+  echo "$cur" >"$f"
+  picker_rows "$cur"
+}
+
+picker() {
+  command -v fzf >/dev/null || { ws_ls; echo; info "Install fzf for the picker, or: ws open <name>"; return 0; }
+  local ide picked state
+  state=$(mktemp); PICKER_STATE=$state; trap 'rm -f "${PICKER_STATE:-}" "${PICKER_STATE:-}.need-wc"' EXIT
+  ide=$(default_ide); ide_installed "$ide" || ide=$(installed_ides | head -1)
+  [[ -n "$ide" ]] || die "No supported IDE installed · see: ws default"
+  echo "$ide" >"$state"
+  # ctrl-x closes the window. Without Window Calls it leaves fzf first (so the
+  # terminal is back to normal) and then offers to install it.
+  local close_bind="ctrl-x:execute-silent('$SELF' __close '$state' {+1})+reload('$SELF' __cycle '$state' 0)"
+  wc_ok || close_bind="ctrl-x:execute-silent(touch '$state.need-wc')+abort"
+  mapfile -t picked < <(
+    picker_rows "$ide" |
+      ui_fzf "ws · workspaces" --multi --delimiter='\t' --with-nth=2 --header-lines=1 --prompt='workspace> ' \
+        --bind="$close_bind" \
+        --bind="right:reload('$SELF' __cycle '$state' 1)" \
+        --bind="left:reload('$SELF' __cycle '$state' -1)" |
+      cut -f1
+  )
+  if [[ -f "$state.need-wc" ]]; then
+    rm -f "$state.need-wc"
+    info "Closing windows from ws needs the GNOME extension Window Calls."
+    "$ROOT/install.sh" window-calls
+    # back to the picker once it works (Wayland only loads it after logging in again)
+    wc_ok && { picker; return; }
+    return 0
+  fi
+  (( ${#picked[@]} )) || return 0
+  open_many "$(<"$state")" "${picked[@]}"
+}
+
+ws_ls() {
+  [[ -t 1 ]] || ui_no_color
+  local ide; ide=$(default_ide)
+  OPEN=$(open_names "$ide")
+  { printf '%s\n' "  ${C_BOLD}WORKSPACE${C_RESET}$S${C_BOLD}FOLDER${C_RESET}"; rows | cut -d"$S" -f2-; } |
+    ui_table "ws · workspaces" "$(ui_mark_here) open in $(ide_field "$ide" 4)"
+}
+
+usage() {
+  ui_help ws "workspaces in your IDE" <<'EOF'
+ws	picker	←→ IDE · tab tick · ctrl-x close
+ws <name>...	open these in the default IDE (focus them if already open)
+ws ls	every workspace, ● = open in the default IDE
+ws close <name>...	close their windows	needs Window Calls: ./install.sh window-calls
+ws default [ide]	show the IDEs / set the one ws opens in	WS_EDITOR overrides it once
+ws edit	your workspace list	~/.config/ws/workspaces
+ws help	this page
+
+Your list is yours: toolkit updates never change it. An "@<layer>" line brings in that
+layer's shared list (delete it to leave it out). Open ones get focused, never twice.
+EOF
+}
+
+# ----------------------------------------------------------------- main ---
+cmd_edit() {
+  local f; f=$(ws_personal_init)
+  "${EDITOR:-nano}" "$f"
+  local missing; missing=$(ws_list | awk -F'\t' '$2 != "" { print $1 }' | while read -r p; do [[ -e $p ]] || echo x; done | wc -l)
+  (( missing )) && info "${C_DIM}$missing listed repo(s) aren't cloned yet · tk install repos${C_RESET}"
+  return 0
+}
+
+ENTRIES=$(entries)
+
+case "${1:-}" in
+  "") picker ;;
+  help|-h|--help) usage ;;
+  ls|list) ws_ls ;;
+  default) if [[ -n "${2:-}" ]]; then ide_default "$2"; else ide_ls; fi ;;
+  close) shift; close_many "$(default_ide)" "$@" ;;
+  edit) cmd_edit ;;
+  __names) cut -f1 <<<"$ENTRIES" ;;
+  __ides) ide_ids ;;
+  __cycle) [[ -z "${NO_COLOR:-}" ]] && ui_color; cycle "$2" "$3" ;;
+  __close) f="$2"; shift 2; close_many "$(<"$f")" "$@" >/dev/null 2>&1; sleep 0.4 ;;
+  -*) ui_unknown ws "$1" ;;
+  *)
+    [[ -n "$(find_entry "$1")" ]] || ui_unknown ws "$1" workspace
+    open_many "$(default_ide)" "$@" ;;
+
+esac

@@ -1,0 +1,162 @@
+#!/usr/bin/env -S python3 -I
+"""k-devices: rofi's speaker / mic / wifi / bluetooth tabs (script mode, started by k-launch).
+One script, four names: it works out which tab it is from the name it was started as
+(k-speaker, k-mic, k-wifi, k-bluetooth are symlinks to it). Pick a row to switch to it;
+the result comes as a desktop notification. A wifi network with a password asks for it
+in the same list (type it, Enter)."""
+import json, os, re, subprocess, sys
+
+KIND = os.path.basename(sys.argv[0]).removeprefix("k-")
+STATE = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "k-devices-wifi")
+
+
+def out(*cmd):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=8).stdout
+    except Exception:
+        return ""
+
+
+def bg(script, *args, stdin=""):
+    """run a shell snippet detached (so rofi can close right away); args arrive as $1, $2 ..."""
+    p = subprocess.Popen(["setsid", "-f", "sh", "-c", script, "k-devices", *args], stdin=subprocess.PIPE,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    p.communicate(stdin.encode())
+
+
+def notify(msg):   # shell snippet; msg may use "$1"
+    return f'notify-send -a k-devices -i audio-card Devices "{msg}"'
+
+
+def head(prompt_msg=None, custom=False):
+    if prompt_msg:
+        print(f"\0message\x1f{prompt_msg}")
+    if not custom:
+        print("\0no-custom\x1ftrue")
+
+
+def row(label, info, active=False):
+    print(("●  " if active else "    ") + label.replace("\n", " ") + "\0info\x1f" + info)
+
+
+# ------------------------------------------------------------- speaker / mic ---
+def audio():
+    want = "Sinks" if KIND == "speaker" else "Sources"
+    sec, rows = "", []
+    for line in out("wpctl", "status").splitlines():
+        s = re.sub(r"^[\s│├└─]+", "", line)
+        if re.match(r"^[A-Za-z ]+:$", s):
+            sec = s[:-1]
+            continue
+        m = re.match(r"^(\*)?\s*(\d+)\.\s+(.*?)\s+\[vol: ([\d.]+)( MUTED)?\]", s)
+        if sec == want and m:
+            rows.append((m[3], m[2], bool(m[1]), round(float(m[4]) * 100), bool(m[5])))
+    return rows
+
+
+def list_audio():
+    head("Pick one to make it the default")
+    for name, wid, cur, vol, muted in audio():
+        row(f"{name}  ·  {'muted' if muted else str(vol) + '%'}", "a:" + wid, cur)
+
+
+# ------------------------------------------------------------------ bluetooth ---
+def bt_devices():
+    res = []
+    for line in out("bluetoothctl", "devices", "Paired").splitlines():
+        m = re.match(r"Device (\S+) (.*)", line)
+        if m:
+            on = "Connected: yes" in out("bluetoothctl", "info", m[1])
+            res.append((m[2], m[1], on))
+    return res
+
+
+def list_bt():
+    powered = "Powered: yes" in out("bluetoothctl", "show")
+    head("Pick a device to connect or disconnect" if powered else "Bluetooth is off")
+    row("Turn Bluetooth " + ("off" if powered else "on"), "bt-power:" + ("off" if powered else "on"))
+    if powered:
+        for name, mac, on in bt_devices():
+            row(f"{name}  ·  {'connected' if on else 'not connected'}", "bt:" + mac, on)
+
+
+# ----------------------------------------------------------------------- wifi ---
+def split_terse(line):
+    return [c.replace("\\:", ":") for c in re.split(r"(?<!\\):", line)]
+
+
+def list_wifi():
+    if out("nmcli", "radio", "wifi").strip() != "enabled":
+        head("Wi-Fi is off")
+        row("Turn Wi-Fi on", "wifi-power:on")
+        return
+    saved = {split_terse(l)[0] for l in out("nmcli", "-t", "-f", "NAME,TYPE", "connection", "show").splitlines()
+             if split_terse(l)[1:2] == ["802-11-wireless"]}
+    best = {}
+    for line in out("nmcli", "-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY", "device", "wifi", "list").splitlines():
+        use, ssid, sig, sec = (split_terse(line) + ["", "", "", ""])[:4]
+        if not ssid:
+            continue
+        cur = best.get(ssid)
+        if cur is None or use == "*" or (cur[0] != "*" and int(sig or 0) > cur[1]):
+            best[ssid] = (use, int(sig or 0), sec)
+    head("Pick a network to connect to")
+    row("Turn Wi-Fi off", "wifi-power:off")
+    for ssid, (use, sig, sec) in sorted(best.items(), key=lambda kv: (kv[1][0] != "*", -kv[1][1])):
+        kind = "saved" if ssid in saved else ("password needed" if sec else "open")
+        row(f"{ssid}  ·  {sig}%  ·  {kind}", "w:" + ssid, use == "*")
+
+
+def wifi_connect(ssid, known, password=None):
+    done = f"{notify('Connected to $1')} || {notify('Could not connect to $1')}"
+    if password is not None:
+        bg(f'nmcli --ask device wifi connect "$1" && {done}', ssid, stdin=password + "\n")
+    elif known:
+        bg(f'nmcli connection up id "$1" && {done}', ssid)
+    else:
+        bg(f'nmcli device wifi connect "$1" && {done}', ssid)
+
+
+# ----------------------------------------------------------------------- main ---
+def main():
+    arg = sys.argv[1] if len(sys.argv) > 1 else ""
+    info = os.environ.get("ROFI_INFO", "")
+    retv = os.environ.get("ROFI_RETV", "0")
+
+    if KIND == "wifi" and retv == "2" and os.path.exists(STATE):   # typed text = the password
+        ssid = open(STATE).read()
+        os.remove(STATE)
+        wifi_connect(ssid, False, arg)
+        return
+    if arg and os.path.exists(STATE):
+        os.remove(STATE)
+
+    if info.startswith("a:"):
+        bg(f"wpctl set-default {info[2:]} && {notify('Default ' + KIND + ' changed')}")
+    elif info.startswith("bt-power:"):
+        bg(f"bluetoothctl power {info[9:]}")
+    elif info.startswith("bt:"):
+        mac = info[3:]
+        on = any(m == mac and c for _, m, c in bt_devices())
+        verb, done = ("disconnect", "Disconnected") if on else ("connect", "Connected")
+        bg(f"bluetoothctl {verb} {mac} && {notify(done)} || {notify('Bluetooth ' + verb + ' failed')}")
+    elif info.startswith("wifi-power:"):
+        bg(f"nmcli radio wifi {info[11:]}")
+    elif info.startswith("w:"):
+        ssid = info[2:]
+        net = [split_terse(l) for l in out("nmcli", "-t", "-f", "SSID,SECURITY", "device", "wifi", "list").splitlines()]
+        secured = any(n[0] == ssid and n[1:2] and n[1] for n in net)
+        known = ssid in {split_terse(l)[0] for l in out("nmcli", "-t", "-f", "NAME", "connection", "show").splitlines()}
+        if secured and not known:
+            open(STATE, "w").write(ssid)
+            head(f"Password for {ssid}: type it and press Enter (Esc cancels)", custom=True)
+            print("Cancel\0info\x1fcancel")
+        else:
+            wifi_connect(ssid, known)
+    elif info == "cancel":
+        pass
+    else:
+        {"speaker": list_audio, "mic": list_audio, "wifi": list_wifi, "bluetooth": list_bt}.get(KIND, list_audio)()
+
+
+main()
