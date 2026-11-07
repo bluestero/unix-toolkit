@@ -11,7 +11,7 @@ Every command speaks the same words: `<tool>` picker, `<tool> <name>` switch, `l
 | `kx` | Kubernetes contexts **per shell** (switching in one terminal never moves another), namespaces, global default, EKS contexts linked to okcli profiles. Also a friendly front to kubectl: `kx pods`, `why`, `logs`, `shell`, `deploys`, `configs`, `secrets`, `services`, `forward`, `events`, `top`, `get` (see `kx help`). |
 | `twin` | Twingate exit nodes: picker, `twin gb`, `twin off`. Codes come from the node names. |
 | `ws` | Open workspaces in your IDE. Picker: ↑↓ pick, ←→ switch IDE (● = already open there, gets focused), tab ticks several, ctrl-x closes the window (needs `window-calls`). `ws <name>`, `ws close <name>`, `ws ls`, `ws default [ide]`, `ws edit` (your list: `~/.config/ws/workspaces`, which can include your layers' shared lists). |
-| `hat` | Which Claude profile, GitHub account and AWS profile a folder uses, for every repo under it. `hat` is a panel of folders (enter change, alt-a add a folder, ctrl-x take off, alt-c Claude profiles, alt-g GitHub accounts); `hat set ~/code claude=personal github=me`, `hat ls`, `hat show`, `hat github add <account>` (makes the SSH key too). `ws ls` shows each workspace's. See [Hats](#hats-claude-github-and-aws-per-folder). |
+| `hat` | Which Claude profile, GitHub account and AWS profile a folder uses, for every repo under it. `hat` is one table of every folder wearing a hat, edited in place: ↑↓ folder, alt-←→ column, ←→ change the cell (tab searches the choices beside the table), enter saves them all; alt-a adds a folder, ctrl-x takes its hats off, alt-c / alt-g list the Claude profiles and GitHub accounts (add, remove). Questions open inside the table. `hat set ~/code claude=personal github=me`, `hat ls`, `hat show`, `hat github add <account>` (added only once GitHub knows its key). `ws ls` shows each workspace's. See [Hats](#hats-claude-github-and-aws-per-folder). |
 | `ctx` | One screen: AWS profile, cluster/namespace, Twingate, defaults and repo pin. `ctx plain` gives the same as labelled lines (what Claude Code gets). |
 | `k-icon` | Kitty app icon: picker, `k-icon <name>`, `k-icon ls`. |
 | `k-config` | Edit `kitty/kitty.conf` (the file kitty reads through the link) in `$EDITOR` (else nano); warns if the link is missing. kitty reloads it by itself on save (0.47+). |
@@ -198,8 +198,11 @@ Not an installer step: set it up when you need it, with `hat`.
 | AWS profile | `export AWS_PROFILE=…` in the `.envrc`, the same line `okcli pin` writes | everything under the folder |
 | GitHub account | `[includeIf "gitdir:<folder>/"]` in `~/.gitconfig` → `~/.config/hat/github/<account>.gitconfig` | every repo under the folder |
 
-A GitHub account is its commit name and email plus its SSH key; its own small ssh config
-offers that key first, so plain `git@github.com:` remotes sign in as that account. `.envrc`
+A GitHub account is its commit name and email plus its SSH key. Its own small ssh config
+offers only that key to GitHub, so plain `git@github.com:` remotes sign in as that account;
+the agent still holds it, so a key with a passphrase asks once, as usual, and every other
+host reads your own `~/.ssh/config`. An account is added only when `ssh -T git@github.com`
+with its key answers with its name. `.envrc`
 files hat writes start with `source_up_if_exists`, so a repo's own `.envrc` doesn't drop its
 parent folder's hat. A hat on a folder inside another one wins there.
 

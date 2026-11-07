@@ -14,6 +14,13 @@ look and helpers live in `lib/ui.sh`; every tool uses them.
   background with progress in the footer; results (✓ ✗) fade after 5 s. Logs
   stay full screen; a shell or port-forward opens in its own kitty tab (needs fzf 0.63+).
   Outside a list they open a small box.
+- **Never leave the picker to ask.** This holds for every list, not only kx: yes/no
+  questions *and* typed ones (a folder, a port, a name) open in the picker itself,
+  in its header and prompt, the way `kube/lib/list.sh` does (`list_confirm`,
+  `list_ask`); the list stays open before, during and after. A wrong answer never
+  closes anything: the same question comes back with why it failed on top, in red,
+  and the typed text kept so it can be fixed (`list_ask` retry). Only a screen that
+  must be full (logs) or its own process (a shell, a port-forward: its own kitty tab) leaves.
   Any other picker that reports a result does it the same way, in the footer:
   `ui_fzf --toast` and its key prints `ui_toast "✓ …"` (fzf 0.63+); never in the header.
 - Pick from a list with `ui_fzf`. Pickers fill the window (fzf's own screen, clean on

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # hat - which hat a folder wears: its Claude profile, GitHub account and AWS
 # profile, for every folder and repo under it. `hat help` lists the commands.
-# How each is applied: lib/hat.sh.
+# How each is applied: lib/hat.sh. The panel is one fzf that stays open: every
+# key runs `hat __key ...`, which prints fzf actions (lib/inplace.sh asks questions).
 
 set -uo pipefail
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
@@ -10,6 +11,8 @@ ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
 . "$ROOT/lib/ui.sh"
 # shellcheck source=../lib/hat.sh
 . "$ROOT/lib/hat.sh"
+# shellcheck source=../lib/inplace.sh
+. "$ROOT/lib/inplace.sh"
 S=$'\x1f'
 KINDS=(claude github aws)
 tilde() { printf '%s' "${1/#$HOME/\~}"; }
@@ -30,11 +33,15 @@ folders() {
     done
   } | while IFS= read -r f; do [[ -d $f ]] && echo "$f"; done | sort -u
 }
-# a pin in ~ (or /) would apply everywhere: that's what the defaults are for
-check_dir() {
-  [[ -d $1 ]] || die "No folder $(tilde "$1")"
-  [[ $1 != "$HOME" && $1 != / ]] || die "That's $(tilde "$1"), so it would apply everywhere. Pick a folder of its own."
+# why a folder can't wear a hat (nothing when it can); a hat in ~ or / would
+# apply everywhere: that's what the defaults are for
+dir_problem() {
+  if [[ ! -e $1 ]]; then echo "there's no folder $(tilde "$1")"
+  elif [[ ! -d $1 ]]; then echo "$(tilde "$1") is a file, not a folder"
+  elif [[ $1 == "$HOME" || $1 == / ]]; then echo "that's $(tilde "$1"), so it would apply everywhere: pick a folder of its own"
+  fi
 }
+check_dir() { local p; p=$(dir_problem "$1"); [[ -z $p ]] || die "${p^}"; }
 
 # ---------------------------------------------------------------- .envrc ---
 direnv_allow() { command -v direnv >/dev/null && direnv allow "$1" 2>/dev/null; return 0; }
@@ -57,7 +64,7 @@ envrc_unset() {   # <dir> <VAR>
 
 # ------------------------------------------------------------------ set ---
 set_one() {   # <dir> <kind> <value or empty = back to the default>
-  local d=$1 k=$2 v=$3 key
+  local d=$1 k=$2 v=$3
   if [[ -n $v ]] && ! grep -Fxq -- "$v" <<<"$(kind_values "$k")"; then
     die "No $(kind_label "$k") '$v' · see: $([[ $k == aws ]] && echo "okcli ls" || echo "hat $k")"
   fi
@@ -87,7 +94,7 @@ cmd_set() {   # [dir] [claude=x] [github=y] [aws=z]
   local d="" a k v
   for a in "$@"; do [[ $a == *=* ]] || d=$a; done
   d=$(abs "$d"); check_dir "$d"
-  if [[ "$*" != *=* ]]; then edit_folder "$d"; return; fi
+  if [[ "$*" != *=* ]]; then panel folders "$d"; return; fi
   for a in "$@"; do
     [[ $a == *=* ]] || continue
     k=${a%%=*}; v=${a#*=}; [[ $v == - || $v == default ]] && v=""
@@ -133,192 +140,539 @@ cmd_show() {
   } | ui_fields hat "$(legend)"
 }
 
-# ---------------------------------------------------------------- panel ---
-foot() { [[ -n ${MSG:-} ]] && ui_fzf_at_least 0.63 && printf -- '--footer=%s' "$MSG"; }
-
-# pick a value for one kind; prints it ("" = the default), 1 = cancelled
-pick_value() {
-  local d=$1 k=$2 cur out
-  case $k in claude) cur=1 ;; github) cur=3 ;; *) cur=5 ;; esac
-  cur=$(hat_get "$d" | cut -f"$cur")
-  out=$({ printf '\t  %s\n' "– the default (nothing set here)"
-          kind_values "$k" | while IFS= read -r v; do
-            if [[ $v == "$cur" ]]; then printf '%s\t%s\n' "$v" "$(ui_mark_here) $C_BOLD$v$C_RESET"; else printf '%s\t  %s\n' "$v" "$v"; fi
-          done; } |
-    ui_fzf "hat · $(kind_label "$k")" --delimiter='\t' --with-nth=2 --prompt="$k> " \
-      --header="$(kind_label "$k") for $(tilde "$d") · enter: pick · esc: back") || return 1
-  printf '%s' "${out%%$'\t'*}"
+# ------------------------------------------------------------- accounts ---
+valid_name() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; }
+# the listed folders that set a profile/account themselves
+users_of() {   # <kind> <value>
+  local d col; col=$([[ $1 == claude ]] && echo 1 || echo 3)
+  while IFS= read -r d; do
+    [[ -n $d ]] && hat_get "$d" | awk -F'\t' -v c="$col" -v v="$2" -v d="$d" '$c == v && $(c + 1) == d { print d }'
+  done <<<"$(folders)"
 }
 
-edit_folder() {   # change one folder's hats, one kind at a time
-  local d=$1 k v x
-  while :; do
-    IFS=$'\x1f' read -r -a x <<<"$(hat_cells "$d")"
-    k=$(printf '%s\t  %-16s %s\n' claude "Claude profile" "${x[0]}" github "GitHub account" "${x[1]}" aws "AWS profile" "${x[2]}" |
-      ui_fzf "hat · $(tilde "$d")" --delimiter='\t' --with-nth=2 --prompt='change> ' \
-        --header="$(tilde "$d") · enter: change · esc: back" | cut -f1) || return 0
-    [[ -n $k ]] || return 0
-    v=$(pick_value "$d" "$k") || continue
-    set_one "$d" "$k" "$v" 2>/dev/null
-    [[ $k == github && -n $v ]] && ! hat_github_key_ok "$v" &&
-      warn "the key in $(tilde "$HAT_GH/$v.gitconfig") isn't there yet · hat github"
-  done
-}
 gh_key() { sed -n 's/^[[:space:]]*IdentityFile[[:space:]]*//p' "$HAT_GH/$1.ssh_config" 2>/dev/null | head -1; }
 hat_github_key_ok() { local k; k=$(gh_key "$1"); [[ -n $k && -f ${k/#\~/$HOME} ]]; }
-# An account is two files: <a>.gitconfig (commit name and email, and the ssh to use)
-# and <a>.ssh_config. That one offers the account's key first, skipping the agent
-# (whose own order would win), then reads your ~/.ssh/config as usual.
+# An account's ssh config: on GitHub (and github-* aliases) only its key is offered,
+# from the agent when it's loaded there (so a passphrase is asked once, as usual);
+# every other host reads your own ~/.ssh/config.
+gh_ssh_conf() {   # <account> <key>
+  printf '%s\n' "# hat: GitHub account $1 · on GitHub only its key; other hosts: your own ssh config" \
+    "Host github.com github-*" "	HostName github.com" "	User git" "	IdentityFile $(tilde "$2")" \
+    "	IdentitiesOnly yes" "	AddKeysToAgent yes" "Match !originalhost github.com,github-*" "	Include ~/.ssh/config"
+}
 gh_write() {   # <account> <name> <email> <key>
   mkdir -p "$HAT_GH"
   printf '# hat: GitHub account %s (folders that wear it: hat ls)\n[user]\n\tname = %s\n\temail = %s\n[core]\n\tsshCommand = ssh -F %s\n' \
     "$1" "$2" "$3" "$(tilde "$HAT_GH/$1.ssh_config")" >"$HAT_GH/$1.gitconfig"
-  printf '# hat: %s'"'"'s key first, then your own ssh config\nHost *\n\tIdentityFile %s\n\tIdentitiesOnly yes\n\tIdentityAgent none\nInclude ~/.ssh/config\n' \
-    "$1" "$(tilde "$4")" >"$HAT_GH/$1.ssh_config"
+  gh_ssh_conf "$1" "$4" >"$HAT_GH/$1.ssh_config"
 }
-
-panel() {
-  command -v fzf >/dev/null && [[ -t 0 && -t 1 ]] || { cmd_ls; return 0; }
-  local out key d MSG=""
-  while :; do
-    out=$({ printf '\t%s\n' "$(head_row)"; folder_rows; } |
-      ui_fzf "hat · folders" --sortable --delimiter='\t' --with-nth=2 --header-lines=1 --prompt='folder> ' \
-        --expect=alt-a,ctrl-x,alt-c,alt-g $(foot) \
-        --header='enter: change · alt-a: add a folder · ctrl-x: take off · alt-c: Claude profiles · alt-g: GitHub accounts · ↑: from a parent folder · ⇄: set in the repo itself · –: the default') || return 0
-    MSG=""
-    key=$(sed -n 1p <<<"$out"); d=$(sed -n 2p <<<"$out" | cut -f1)
-    case $key in
-      alt-a)
-        d=$(ui_ask "Folder to give a hat (~/... or /...)" "$(tilde "$PWD")/") || continue
-        d=$(abs "$d")
-        if [[ ! -d $d ]]; then MSG="✗ no folder $(tilde "$d")"; continue; fi
-        if [[ $d == "$HOME" || $d == / ]]; then MSG="✗ $(tilde "$d") would apply everywhere"; continue; fi
-        edit_folder "$d" ;;
-      ctrl-x) [[ -n $d ]] && MSG=$(cmd_off "$d" 2>&1 | tail -1) ;;
-      alt-c) accounts claude ;;
-      alt-g) accounts github ;;
-      *) [[ -n $d ]] && edit_folder "$d" ;;
-    esac
-  done
+key_locked() {   # a passphrase, and not loaded in the agent
+  local k=$1 fp
+  ssh-keygen -y -P "" -f "$k" >/dev/null 2>&1 && return 1
+  fp=$(ssh-keygen -lf "$k.pub" 2>/dev/null | awk '{print $2}')
+  [[ -z $fp ]] || ! ssh-add -l 2>/dev/null | grep -Fq "$fp"
 }
-
-# ------------------------------------------------------------- accounts ---
-# who uses a profile/account: the listed folders that set it themselves
-users_of() {   # <kind> <value>
-  local d col; col=$([[ $1 == claude ]] && echo 1 || echo 3)
-  while IFS= read -r d; do
-    hat_get "$d" | awk -F'\t' -v c="$col" -v v="$2" -v d="$d" '$c == v && $(c + 1) == d { print d }'
-  done < <(folders)
+# Does GitHub take this key as <account>? ok / other <name> / denied / locked / error <why>
+gh_check() {   # <account> <key>
+  local tmp out; tmp=$(mktemp)
+  gh_ssh_conf "$1" "$2" >"$tmp"
+  out=$(timeout 15 ssh -F "$tmp" -o BatchMode=yes -o ConnectTimeout=8 -T git@github.com 2>&1); rm -f "$tmp"
+  if [[ $out =~ Hi\ ([^!]+)! ]]; then
+    if [[ ${BASH_REMATCH[1],,} == "${1,,}" ]]; then echo ok; else echo "other ${BASH_REMATCH[1]}"; fi
+  elif [[ $out == *"Permission denied"* ]]; then
+    if key_locked "$2"; then echo locked; else echo denied; fi
+  else echo "error $(head -1 <<<"$out")"; fi
 }
-
-acct_rows() {   # <kind>: <name><TAB>table row
-  local v
-  if [[ $1 == github ]]; then
-    printf '\t%s\n' "  ${C_BOLD}ACCOUNT${C_RESET}$S${C_BOLD}EMAIL${C_RESET}$S${C_BOLD}KEY${C_RESET}"
-    while IFS= read -r v; do
-      printf '%s\t  %s\n' "$v" "$v$S$(hat_gh_email "$v")$S$(gh_key "$v")$(hat_github_key_ok "$v" || printf ' %s' "${C_YELLOW}missing${C_RESET}")"
-    done < <(hat_github_accounts)
-  else
-    printf '\t%s\n' "  ${C_BOLD}PROFILE${C_RESET}$S${C_BOLD}FOLDER${C_RESET}"
-    while IFS= read -r v; do printf '%s\t  %s\n' "$v" "$v$S$(tilde "$HAT_CLAUDE/$v")"; done < <(hat_claude_profiles)
+gh_pub() { cat "$1.pub" 2>/dev/null || ssh-keygen -y -f "$1" 2>/dev/null; }
+key_problem() {   # why a file can't be an SSH key (nothing when it can)
+  if [[ ! -f $1 ]]; then echo "there's no file $(tilde "$1")"
+  elif ! head -1 "$1" | grep -q 'PRIVATE KEY'; then echo "$(tilde "$1") isn't a private SSH key"
   fi
 }
-
-accounts() {   # <kind>: the profiles/accounts panel
-  local k=$1 out key v MSG=""
-  while :; do
-    out=$(acct_rows "$k" | ui_fzf "hat · $(kind_label "$k")s" --sortable --delimiter='\t' --with-nth=2 --header-lines=1 \
-      --prompt="$k> " --expect=alt-a,ctrl-x $(foot) --header='alt-a: add · ctrl-x: remove · esc: back') || return 0
-    key=$(sed -n 1p <<<"$out"); v=$(sed -n 2p <<<"$out" | cut -f1); MSG=""
-    case $key in
-      alt-a) MSG=$("${k}_add" 2>&1 | tail -1) ;;
-      ctrl-x) [[ -n $v ]] && MSG=$("${k}_rm" "$v" 2>&1 | tail -1) ;;
-      *) ;;
-    esac
-  done
+claude_add_problem() {
+  valid_name "$1" || { echo "'$1' isn't a usable name (letters, digits, . _ -)"; return; }
+  [[ -d $HAT_CLAUDE/$1 ]] && echo "there's already a profile $1"
+}
+claude_rm_problem() {
+  local u; u=$(users_of claude "$1" | head -1)
+  [[ -n $u ]] && { echo "$(tilde "$u") still uses $1: change it first"; return; }
+  [[ $(realpath -m "${CLAUDE_CONFIG_DIR:-/nonexistent}") == "$(realpath -m "$HAT_CLAUDE/$1")" ]] && echo "$1 is the one in use here"
+}
+github_user_problem() {
+  valid_name "$1" || { echo "'$1' isn't a GitHub username"; return; }
+  [[ -f $HAT_GH/$1.gitconfig ]] && echo "there's already an account $1"
+}
+github_rm_problem() {
+  local u; u=$(hat_git_rules | awk -F'\t' -v a="$1" '$2 == a { print $1; exit }')
+  [[ -n $u ]] && echo "$(tilde "$u") still uses $1: change it first"
 }
 
-valid_name() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; }
-
+# The command line versions (outside a list: small boxes).
 claude_add() {
-  local n=${1:-}
+  local n=${1:-} p
   [[ -n $n ]] || n=$(ui_ask "New Claude profile name (e.g. personal, work)") || return 0
-  valid_name "$n" || die "'$n' isn't a usable name (letters, digits, . _ -)"
-  [[ -d $HAT_CLAUDE/$n ]] && die "There's already a profile '$n'"
-  mkdir -p "$HAT_CLAUDE/$n"
-  ok "Claude profile $n · give a folder this hat, run claude there and sign in"
+  p=$(claude_add_problem "$n"); [[ -z $p ]] || die "${p^}"
+  mkdir -p "$HAT_CLAUDE/$n" && ok "Claude profile $n · give a folder this hat, run claude there and sign in"
 }
 claude_rm() {
-  local n=$1 u
+  local n=$1 p
   [[ -d $HAT_CLAUDE/$n ]] || die "No Claude profile '$n'"
-  u=$(users_of claude "$n" | head -3)
-  [[ -z $u ]] || die "$(tilde "$(head -1 <<<"$u")") still uses $n · change it first"
-  [[ $(realpath -m "${CLAUDE_CONFIG_DIR:-}") == "$(realpath -m "$HAT_CLAUDE/$n")" ]] && die "$n is the one in use here"
+  p=$(claude_rm_problem "$n"); [[ -z $p ]] || die "${p^}"
   confirm "Delete the Claude profile $n? Its sign-in, history and settings in $(tilde "$HAT_CLAUDE/$n") go too." n || return 0
   rm -rf -- "${HAT_CLAUDE:?}/$n" && ok "Claude profile $n deleted"
 }
-
 github_add() {
-  local a=${1:-} name email key out
+  local a=${1:-} name email key p r
   [[ -n $a ]] || a=$(ui_ask "GitHub account (its username)") || return 0
-  valid_name "$a" || die "'$a' isn't a GitHub username"
-  [[ -f $HAT_GH/$a.gitconfig ]] && die "There's already an account '$a'"
-  name=$(ui_ask "Your name on $a's commits" "$(git config --global user.name)") || return 0
+  p=$(github_user_problem "$a"); [[ -z $p ]] || die "${p^}"
+  name=$(ui_ask "Name on $a's commits" "$(git config --global user.name)") || return 0
   email=$(ui_ask "Email on $a's commits") || return 0
-  [[ $email == ?*@?* ]] || die "'$email' isn't an email address"
+  [[ $email == ?*@?*.?* ]] || die "'$email' isn't an email address"
   key="$HOME/.ssh/github-$a"
   if [[ ! -f $key ]]; then
-    if confirm "There's no SSH key ~/.ssh/github-$a yet. Make one?"; then
-      ssh-keygen -q -t ed25519 -C "$email" -f "$key" </dev/tty || die "ssh-keygen failed"
-      info "Add this public key to $a on GitHub (https://github.com/settings/ssh/new):"
-      info "  $(cat "$key.pub")"
+    if confirm "There's no key ~/.ssh/github-$a yet. Make one? (no passphrase; add one later: ssh-keygen -p -f ~/.ssh/github-$a)"; then
+      ssh-keygen -q -t ed25519 -N "" -C "$email" -f "$key" </dev/null || die "ssh-keygen failed"
     else
       key=$(ui_ask "Key file for $a" "~/.ssh/") || return 0; key=$(abs "$key")
-      [[ -f $key ]] || die "No key $(tilde "$key")"
+      p=$(key_problem "$key"); [[ -z $p ]] || die "${p^}"
     fi
   fi
-  gh_write "$a" "$name" "$email" "$key"
-  out=$(ssh -F "$HAT_GH/$a.ssh_config" -o BatchMode=yes -o ConnectTimeout=8 -T git@github.com 2>&1)
-  if [[ $out == *"Hi $a!"* ]]; then ok "GitHub account $a ($email); its key works"
-  else ok "GitHub account $a ($email) · its key isn't on GitHub yet: add $(tilde "$key").pub to $a"; fi
+  while :; do
+    r=$(gh_check "$a" "$key")
+    case $r in
+      ok) gh_write "$a" "$name" "$email" "$key"; ok "GitHub account $a ($email): GitHub knows its key"; return ;;
+      other*) die "GitHub says $(tilde "$key") belongs to ${r#other }, not $a" ;;
+      locked) die "$(tilde "$key") has a passphrase and isn't loaded: ssh-add $(tilde "$key"), then run this again" ;;
+      error*) die "Couldn't ask GitHub: ${r#error }" ;;
+    esac
+    info "Add this key to $a on GitHub (https://github.com/settings/ssh/new):"
+    info "  $(gh_pub "$key")"
+    confirm "Added it? Check again" y || die "Not added: GitHub doesn't know the key yet."
+  done
 }
 github_rm() {
-  local a=$1 u
+  local a=$1 p
   [[ -f $HAT_GH/$a.gitconfig ]] || die "No GitHub account '$a'"
-  u=$(hat_git_rules | awk -F'\t' -v a="$a" '$2 == a { print $1; exit }')
-  [[ -z $u ]] || die "$(tilde "$u") still uses $a · change it first"
+  p=$(github_rm_problem "$a"); [[ -z $p ]] || die "${p^}"
   confirm "Remove the GitHub account $a from hat? (its SSH key stays)" n || return 0
   rm -f "$HAT_GH/$a.gitconfig" "$HAT_GH/$a.ssh_config" && ok "GitHub account $a removed (the key stays in ~/.ssh)"
 }
 
-cmd_kind() {   # hat claude|github [add <name>|rm <name>]
-  local k=$1; shift
-  case "${1:-}" in
-    add) "${k}_add" "${2:-}" ;;
-    rm|remove) [[ -n ${2:-} ]] || die "Which one? · see: hat $k ls"; "${k}_rm" "$2" ;;
-    ls|"")
-      if [[ -z ${1:-} && -t 0 && -t 1 ]] && command -v fzf >/dev/null; then accounts "$k"; return; fi
-      [[ -t 1 ]] || ui_no_color
-      acct_rows "$k" | cut -f2 | ui_table "hat · $(kind_label "$k")s" ;;
-    *) ui_unknown "hat $k" "$1" ;;
+# ================================================================ panel ===
+# State, in $IP (lib/inplace.sh): cells (the folders and their hats, cached),
+# unsaved (cells changed, not saved: folder TAB kind TAB value), extras (folders added here that
+# have no hat yet), focus (the row's folder), col (0 folder, 1-3 Claude/GitHub/AWS),
+# sort ("<col> asc|desc"), mode (list, confirm, ask, pick, acct-claude, acct-github, verify).
+
+P_HINTS="# ↑ from a parent folder · ⇄ set in the repo itself · – the default · • not saved yet
+↑↓: folder · alt-←→: column · ←→: change · tab: search the choices · enter: save · alt-s: sort · alt-a: add a folder · ctrl-x: take off · alt-c: Claude profiles · alt-g: GitHub accounts · esc: quit"
+
+p_cmd() { printf '%q %s' "$SELF" "$*"; }
+# key hints for the header the list is about to have: the whole width, or beside
+# the side pane (a callback's FZF_PREVIEW_* describe the pane as it is right now)
+p_keys() {   # text [pane]
+  if [[ ${2:-} == pane ]]; then FZF_PREVIEW_COLUMNS=1 FZF_PREVIEW_LEFT=$(( ${FZF_COLUMNS:-$(ui_cols)} * 40 / 100 )) ui_keys "$1"
+  else FZF_PREVIEW_COLUMNS=0 ui_keys "$1"; fi
+}
+p_cache() {
+  local here f; here=$(abs "$PWD")
+  {
+    [[ $here == "$HOME" || $here == / ]] || echo "$here"
+    folders; cat "$IP/extras" 2>/dev/null
+  } | awk 'NF && !seen[$0]++' | while IFS= read -r f; do printf '%s\t%s\n' "$f" "$(hat_get "$f")"; done >"$IP/cells.new"
+  mv "$IP/cells.new" "$IP/cells"
+}
+p_kind() { echo "${KINDS[$(( $1 - 1 ))]}"; }
+# the value a folder sets itself for a kind (inherited ones don't count)
+p_here() {   # folder kind
+  local c; case $2 in claude) c=2 ;; github) c=4 ;; *) c=6 ;; esac
+  awk -F'\t' -v f="$1" -v c="$c" '$1 == f { if ($(c + 1) == f) print $c; exit }' "$IP/cells"
+}
+# what the cell will hold: unsaved value, else the folder's own
+p_value() {   # folder kind
+  local l; l=$(awk -F'\t' -v f="$1" -v k="$2" '$1 == f && $2 == k { print "=" $3; exit }' "$IP/unsaved")
+  if [[ -n $l ]]; then printf '%s' "${l#=}"; else p_here "$1" "$2"; fi
+}
+p_pend() {   # folder kind value: unsaved, unless it's what's there already
+  awk -F'\t' -v f="$1" -v k="$2" '!($1 == f && $2 == k)' "$IP/unsaved" >"$IP/unsaved.new"
+  [[ $3 == "$(p_here "$1" "$2")" ]] || printf '%s\t%s\t%s\n' "$1" "$2" "$3" >>"$IP/unsaved.new"
+  mv "$IP/unsaved.new" "$IP/unsaved"
+}
+p_unsaved() { grep -c . "$IP/unsaved" 2>/dev/null; }
+
+p_join() { local IFS=$'\x1f'; printf '%s' "$*"; }
+# the rows: folder TAB laid-out cells, the title row first
+p_rows() {   # [width]
+  local width=${1:-${FZF_COLUMNS:-$(ui_cols)}} focus col sc sd here line f c k v w plain styled key
+  local -a x titles=(FOLDER CLAUDE GITHUB AWS) cell=() sk=()
+  local -A P=()
+  focus=$(ip_get focus); col=$(ip_get col); col=${col:-1}
+  read -r sc sd <<<"$(ip_get sort)"
+  here=$(abs "$PWD")
+  while IFS=$'\x1e' read -r f k v; do [[ -n $f ]] && P["$f|$k"]=$v; done < <(tr '\t' '\036' <"$IP/unsaved")
+  # title row: the column you're on in colour, ▲▼ on the sorted one
+  for c in 0 1 2 3; do
+    w=${titles[c]}; [[ $sc == "$c" ]] && w+=" $([[ $sd == desc ]] && echo ▼ || echo ▲)"
+    if (( c == col )); then w="$C_CYAN$C_BOLD$w$C_RESET"; else w="$C_BOLD$w$C_RESET"; fi
+    if (( c == 0 )); then cell[c]="  $w"; else cell[c]="  $w  "; fi
+  done
+  printf '\t%s\n' "$(p_join "${cell[@]}")"
+  local cv cf gv gf av af
+  while IFS= read -r line; do
+    IFS=$'\x1e' read -r f cv cf gv gf av af <<<"${line//$'\t'/$'\x1e'}"
+    x=("" "" "$cv" "$cf" "$gv" "$gf" "$av" "$af")
+    [[ -n $f ]] || continue
+    cell[0]="  $(tilde "$f")"; [[ $f == "$here" ]] && cell[0]="$(ui_mark_here) $(tilde "$f")"
+    sk[0]=$(tilde "$f")
+    for c in 1 2 3; do
+      k=${KINDS[c - 1]}; v=${x[c * 2]}; w=${x[c * 2 + 1]}
+      if [[ -v P["$f|$k"] ]]; then v=${P["$f|$k"]}; plain="${v:-–} •"; styled="$C_YELLOW${v:-–} •$C_RESET"
+      elif [[ -z $v ]]; then plain="–"; styled="$C_DIM–$C_RESET"
+      elif [[ $w == remote ]]; then plain="$v ⇄"; styled="$v $C_DIM⇄$C_RESET"
+      elif [[ $w == "$f" ]]; then plain=$v; styled=$v
+      else plain="$v ↑"; styled="$v $C_DIM↑$C_RESET"; fi
+      sk[c]=$plain
+      if [[ $f == "$focus" ]] && (( c == col )); then cell[c]="$C_CYAN$C_BOLD◂$C_RESET $styled $C_CYAN$C_BOLD▸$C_RESET"
+      else cell[c]="  $styled  "; fi
+    done
+    key=""; [[ -n $sc ]] && key=${sk[sc]}
+    printf '%s\t%s\t%s\n' "$key" "$f" "$(p_join "${cell[@]}")"
+  done <"$IP/cells" | if [[ -n $sc ]]; then sort -t$'\t' -k1,1 -f $([[ $sd == desc ]] && echo -r); else cat; fi | cut -f2-
+} 2>/dev/null
+p_laid() { p_rows "$@" | UI_TABLE_FIELD=2 print_table 3 "$(( ${1:-${FZF_COLUMNS:-$(ui_cols)}} - 6 ))"; }
+# where a folder's row is (1 = first), for pos()
+p_pos_of() { p_laid | tail -n +2 | awk -F'\t' -v f="$1" '$1 == f { print NR; exit }'; }
+
+p_footer() {
+  local n; n=$(p_unsaved)
+  if (( n )); then ip_fz change-footer "$C_YELLOW$n unsaved change$( (( n > 1 )) && echo s) · enter saves · esc asks first$C_RESET"
+  else ip_fz change-footer " "; fi
+}
+# back to the folders: rows, header, prompt, the cursor where it was
+# The cursor goes back to the focused folder once fzf has the new rows: the result
+# event runs `__key result` (pos() right after a reload can land before the rows do).
+# (Not --track: with it, fzf drops the actions after a reload-sync that changes the query.)
+p_jump() { ip_set jump "$(ip_get focus)"; }
+p_to_list() {   # [toast]
+  local -a a
+  p_jump
+  a=("$(ip_fz reload-sync "$(p_cmd __rows)")" "$(ip_back)"
+     "$(ip_fz change-header "$(p_keys "$P_HINTS")")" "$(ip_fz change-prompt 'folder> ')"
+     "$(ip_fz change-border-label ' hat · folders ')" hide-preview)
+  if [[ -n ${1:-} ]]; then a+=("$(ui_toast "$1")"); else a+=("$(p_footer)"); fi
+  ip_join "${a[@]}"
+}
+p_redraw() { p_jump; ip_join "$(ip_fz reload-sync "$(p_cmd __rows)")" "$(p_footer)"; }
+
+# ---- the accounts lists (alt-c, alt-g)
+p_acct_rows() {   # kind
+  local v
+  if [[ $1 == github ]]; then
+    printf '\t%s\n' "  ${C_BOLD}ACCOUNT${C_RESET}$S${C_BOLD}EMAIL${C_RESET}$S${C_BOLD}KEY${C_RESET}"
+    while IFS= read -r v; do
+      [[ -n $v ]] || continue
+      printf '%s\t  %s\n' "$v" "$v$S$(hat_gh_email "$v")$S$(gh_key "$v")$(hat_github_key_ok "$v" || printf ' %s' "${C_YELLOW}missing${C_RESET}")"
+    done <<<"$(hat_github_accounts)"
+  else
+    printf '\t%s\n' "  ${C_BOLD}PROFILE${C_RESET}$S${C_BOLD}FOLDER${C_RESET}$S${C_BOLD}FOLDERS WEARING IT${C_RESET}"
+    while IFS= read -r v; do
+      [[ -n $v ]] || continue
+      printf '%s\t  %s\n' "$v" "$v$S$(tilde "$HAT_CLAUDE/$v")$S$(users_of claude "$v" | grep -c .)"
+    done <<<"$(hat_claude_profiles)"
+  fi | UI_TABLE_FIELD=2 print_table 3 "$(( ${FZF_COLUMNS:-$(ui_cols)} - 6 ))"
+}
+p_to_acct() {   # kind [toast]
+  local -a a; local k=$1 note
+  if [[ $k == github ]]; then note="# a GitHub account: commit name and email, and the SSH key GitHub knows it by"
+  else note="# a Claude profile: its own sign-in, history and settings (~/.claude-profiles/<name>)"; fi
+  a=("$(ip_fz reload-sync "$(p_cmd __acctrows "$k")")" "$(ip_back)" "pos(1)" "$(ip_fz change-query "")"
+     "$(ip_fz change-header "$(p_keys "$note"$'\n'"alt-a: add · ctrl-x: remove · esc: back to the folders")")"
+     "$(ip_fz change-prompt "$k> ")" "$(ip_fz change-border-label " hat · $(kind_label "$k")s ")" hide-preview)
+  if [[ -n ${2:-} ]]; then a+=("$(ui_toast "$2")"); else a+=("$(ip_fz change-footer " ")"); fi
+  ip_set mode "acct-$k"
+  ip_join "${a[@]}"
+}
+
+# ---- tab: the choices for one cell, searchable, the table beside them
+p_pick_rows() {   # kind folder
+  local cur v; cur=$(p_value "$2" "$1")
+  printf '\t  %s\n' "${C_BOLD}$(kind_label "$1" | tr '[:lower:]' '[:upper:]')${C_RESET} for $(tilde "$2")"
+  if [[ -z $cur ]]; then printf -- '-\t%s\n' "$(ui_mark_here) – the default (nothing set here)"
+  else printf -- '-\t  %s\n' "– the default (nothing set here)"; fi
+  while IFS= read -r v; do
+    [[ -n $v ]] || continue
+    if [[ $v == "$cur" ]]; then printf '%s\t%s\n' "$v" "$(ui_mark_here) $C_BOLD$v$C_RESET"; else printf '%s\t  %s\n' "$v" "$v"; fi
+  done <<<"$(kind_values "$1")"
+}
+
+# ---- GitHub account added from the list: user, name, email, key, then GitHub says yes
+p_verify() {
+  local u key r q; u=$(ip_get gh_user); key=$(ip_get gh_key)
+  r=$(gh_check "$u" "$key")
+  case $r in
+    ok)
+      gh_write "$u" "$(ip_get gh_name)" "$(ip_get gh_email)" "$key"
+      p_to_acct github "✓ GitHub account $u added: GitHub knows its key" ; return ;;
+    other*)
+      ip_join "$(ip_ask "Which key is $u's? (a private key file)" gh-keypath "~/.ssh/" "key: ")" \
+        "$(ip_reask "GitHub says $(tilde "$key") belongs to ${r#other }, not $u")"; return ;;
+    locked) q="$(tilde "$key") has a passphrase and isn't loaded: run ssh-add $(tilde "$key") in a terminal, then press enter here to check again." ;;
+    error*) q="Couldn't ask GitHub (${r#error }). Enter tries again." ;;
+    *)      q="GitHub doesn't know this key yet. Add it to $u at github.com/settings/ssh/new (alt-y copies it), then press enter to check again." ;;
   esac
+  ip_set mode verify; ip_set question "$q"
+  ip_join "$(ip_fz change-header "$(ip_header "$q" "enter: check again · alt-y: copy the key · esc: cancel")")" \
+    "$(ip_fz change-prompt "${C_YELLOW}key> ${C_RESET}")" "$(ip_fz change-footer "$(gh_pub "$key")")"
+}
+p_copy() {   # text → clipboard
+  if command -v wl-copy >/dev/null; then wl-copy <<<"$1"
+  elif command -v xclip >/dev/null; then xclip -selection clipboard <<<"$1"
+  elif command -v pbcopy >/dev/null; then pbcopy <<<"$1"
+  else return 1; fi
+}
+
+# ---- keys
+p_key() {   # key folder/row-key query
+  local k=$1 f=$2 q=$3 mode
+  mode=$(ip_get mode); mode=${mode:-list}
+  [[ $mode == list && $k != focus && $k != result ]] && ip_set saved_q "$q"
+  case $mode in
+    list)    p_key_list "$k" "$f" ;;
+    confirm) local a; a=$(ip_answer "$k"); [[ -n $a ]] && p_confirmed "$a" ;;
+    ask)
+      case $k in
+        left) echo backward-char ;; right) echo forward-char ;;
+        enter) p_answer "$q" ;;
+        esc) p_cancel ;;
+      esac ;;
+    pick)
+      case $k in
+        left) echo backward-char ;; right) echo forward-char ;;
+        enter) [[ -n $f ]] || return 0
+               [[ $f == - ]] && f=""
+               p_pend "$(ip_get focus)" "$(ip_get pick_kind)" "$f"
+               p_to_list ;;
+        esc) p_to_list ;;
+      esac ;;
+    acct-*)
+      local kind=${mode#acct-} p
+      case $k in
+        left) echo backward-char ;; right) echo forward-char ;;
+        esc) p_to_list ;;
+        alt-a) if [[ $kind == claude ]]; then ip_ask "Name of the new Claude profile? (e.g. personal, work)" claude-add "" "name: "
+               else ip_ask "GitHub username of the account to add?" gh-user "" "username: "; fi ;;
+        ctrl-x)
+          [[ -n $f ]] || return 0
+          if [[ $kind == claude ]]; then p=$(claude_rm_problem "$f")
+          else p=$(github_rm_problem "$f"); fi
+          if [[ -n $p ]]; then ui_toast "✗ ${p^}"; return; fi
+          if [[ $kind == claude ]]; then ip_confirm "Delete the Claude profile $f? Its sign-in, history and settings in $(tilde "$HAT_CLAUDE/$f") go too." "claude-rm $f" n
+          else ip_confirm "Remove the GitHub account $f from hat? Its SSH key stays in ~/.ssh." "github-rm $f" n; fi ;;
+      esac ;;
+    verify)
+      case $k in
+        enter) p_verify ;;
+        alt-y) if p_copy "$(gh_pub "$(ip_get gh_key)")"; then ui_toast "✓ the public key is copied"
+               else ui_toast "✗ no clipboard tool (wl-copy or xclip): copy it from the bottom line"; fi ;;
+        esc) p_to_acct github ;;
+        left) echo backward-char ;; right) echo forward-char ;;
+      esac ;;
+  esac
+}
+
+p_key_list() {   # key folder
+  local k=$1 f=$2 col n i sc sd pos
+  col=$(ip_get col); col=${col:-1}
+  case $k in
+    focus|resize)
+      [[ $k == focus && ( -z $f || $f == "$(ip_get focus)" ) ]] && return 0
+      [[ -n $f ]] && ip_set focus "$f"
+      p_jump; ip_fz reload-sync "$(p_cmd __rows)" ;;
+    result)
+      local j; j=$(ip_get jump); ip_set jump ""
+      [[ -n $j && -z $(ip_get saved_q) ]] || return 0
+      n=$(p_pos_of "$j"); [[ -n $n ]] && echo "pos($n)" ;;
+    left|right)
+      [[ -n $f ]] || return 0
+      (( col )) || { ui_toast "The folder can't change here: alt-→ goes to its Claude, GitHub and AWS"; return; }
+      local kind vals cur
+      kind=$(p_kind "$col"); cur=$(p_value "$f" "$kind")
+      mapfile -t vals < <(echo; kind_values "$kind")
+      n=${#vals[@]}; i=0
+      for (( j = 0; j < n; j++ )); do [[ ${vals[j]} == "$cur" ]] && { i=$j; break; }; done
+      if [[ $k == right ]]; then i=$(( (i + 1) % n )); else i=$(( (i - 1 + n) % n )); fi
+      p_pend "$f" "$kind" "${vals[i]}"
+      p_redraw ;;
+    alt-left|alt-right)
+      if [[ $k == alt-right ]]; then col=$(( col < 3 ? col + 1 : 3 )); else col=$(( col > 0 ? col - 1 : 0 )); fi
+      ip_set col "$col"
+      p_redraw ;;
+    alt-s)
+      read -r sc sd <<<"$(ip_get sort)"
+      if [[ $sc != "$col" ]]; then ip_set sort "$col asc"
+      elif [[ $sd == asc ]]; then ip_set sort "$col desc"
+      else ip_set sort ""; fi
+      p_redraw ;;
+    tab)
+      [[ -n $f ]] || return 0
+      (( col )) || { ui_toast "Go to a Claude, GitHub or AWS cell first (alt-→)"; return; }
+      local kind; kind=$(p_kind "$col")
+      ip_set mode pick; ip_set pick_kind "$kind"
+      ip_join "$(ip_fz reload-sync "$(p_cmd __pickrows "$kind" "$f")")" "pos(1)" "$(ip_fz change-query "")" enable-search \
+        "$(ip_fz change-header "$(p_keys "type to search · enter: put it in the cell · esc: back" pane)")" \
+        "$(ip_fz change-prompt "$kind> ")" show-preview "$(ip_fz change-footer " ")" ;;
+    enter)
+      n=$(p_unsaved)
+      (( n )) || { ui_toast "Nothing to save: ←→ changes a cell first"; return; }
+      local kind v failed=0
+      while IFS=$'\x1e' read -r f kind v; do
+        [[ -n $f ]] || continue
+        ( set_one "$f" "$kind" "$v" ) >/dev/null 2>&1 || failed=$(( failed + 1 ))
+      done < <(tr '\t' '\036' <"$IP/unsaved")
+      : >"$IP/unsaved"; p_cache
+      if (( failed )); then ip_join "$(p_redraw)" "$(ui_toast "✗ $failed of $n changes didn't save")"
+      else ip_join "$(p_redraw)" "$(ui_toast "✓ $n change$( (( n > 1 )) && echo s) saved")"; fi ;;
+    esc)
+      n=$(p_unsaved)
+      if (( n )); then ip_confirm "Quit and drop $n unsaved change$( (( n > 1 )) && echo s)?" quit n
+      else echo abort; fi ;;
+    ctrl-x)
+      [[ -n $f ]] || return 0
+      if ! has_any "$f"; then ui_toast "$(tilde "$f") has no hat of its own"; return; fi
+      ip_confirm "Take off $(tilde "$f")'s hats? Its Claude profile, GitHub account and AWS profile go back to the defaults." "off $f" n ;;
+    alt-a) ip_ask "Folder to give a hat? (~/… or /…)" add "$(tilde "$PWD")/" "folder: " ;;
+    alt-c|alt-g) p_to_acct "$([[ $k == alt-c ]] && echo claude || echo github)" ;;
+  esac
+}
+
+p_confirmed() {   # yes / no
+  local p w; p=$(ip_get pending)
+  w=${p%% *}
+  case $w in
+    quit) [[ $1 == yes ]] && { echo abort; return; }; p_to_list ;;
+    off)
+      if [[ $1 == yes ]]; then
+        local f=${p#off } k
+        for k in "${KINDS[@]}"; do ( set_one "$f" "$k" "" ) >/dev/null 2>&1; done
+        awk -F'\t' -v f="$f" '$1 != f' "$IP/unsaved" >"$IP/unsaved.new" && mv "$IP/unsaved.new" "$IP/unsaved"
+        p_cache; p_to_list "✓ $(tilde "$f"): back to the defaults"
+      else p_to_list; fi ;;
+    claude-rm|github-rm)
+      local n=${p#* } kind=${w%-rm}
+      if [[ $1 == yes ]]; then
+        if [[ $kind == claude ]]; then rm -rf -- "${HAT_CLAUDE:?}/$n"; p_to_acct claude "✓ Claude profile $n deleted"
+        else rm -f "$HAT_GH/$n.gitconfig" "$HAT_GH/$n.ssh_config"; p_to_acct github "✓ GitHub account $n removed (its key stays in ~/.ssh)"; fi
+      else p_to_acct "$kind"; fi ;;
+    gh-makekey)
+      if [[ $1 == yes ]]; then
+        local key="$HOME/.ssh/github-$(ip_get gh_user)"
+        if ssh-keygen -q -t ed25519 -N "" -C "$(ip_get gh_email)" -f "$key" </dev/null >/dev/null 2>&1; then
+          ip_set gh_key "$key"; p_verify
+        else ip_join "$(p_to_acct github)" "$(ui_toast "✗ ssh-keygen couldn't make $(tilde "$key")")"; fi
+      else ip_ask "Which key is $(ip_get gh_user)'s? (a private key file)" gh-keypath "~/.ssh/" "key: "; fi ;;
+  esac
+}
+
+p_answer() {   # the typed answer
+  local a p d; a=$(sed 's/^[[:space:]]*//; s/[[:space:]]*$//' <<<"$1")
+  case $(ip_get pending) in
+    add)
+      [[ -n $a ]] || { ip_reask "type a folder, like ~/code/my-project"; return; }
+      d=$(abs "$a"); p=$(dir_problem "$d")
+      [[ -z $p ]] || { ip_reask "$p"; return; }
+      echo "$d" >>"$IP/extras"; p_cache
+      ip_set focus "$d"; ip_set col 1; ip_set saved_q ""
+      ip_join "$(p_to_list)" \
+        "$(ip_fz change-footer "${C_YELLOW}$(tilde "$d") added: ←→ picks its Claude, GitHub and AWS, enter saves${C_RESET}")" ;;
+    claude-add)
+      p=$(claude_add_problem "$a"); [[ -z $p ]] || { ip_reask "$p"; return; }
+      mkdir -p "$HAT_CLAUDE/$a"
+      p_to_acct claude "✓ Claude profile $a · give a folder this hat, then run claude there and sign in" ;;
+    gh-user)
+      p=$(github_user_problem "$a"); [[ -z $p ]] || { ip_reask "$p"; return; }
+      ip_set gh_user "$a"
+      ip_ask "Name on $a's commits?" gh-name "$(git config --global user.name)" "name: " ;;
+    gh-name)
+      [[ -n $a ]] || { ip_reask "type the name commits should show"; return; }
+      ip_set gh_name "$a"
+      ip_ask "Email on $(ip_get gh_user)'s commits?" gh-email "" "email: " ;;
+    gh-email)
+      [[ $a == ?*@?*.?* ]] || { ip_reask "'$a' isn't an email address"; return; }
+      ip_set gh_email "$a"
+      local key="$HOME/.ssh/github-$(ip_get gh_user)"
+      if [[ -f $key ]]; then ip_set gh_key "$key"; p_verify
+      else ip_confirm "There's no key ~/.ssh/github-$(ip_get gh_user) yet. Make one? (no passphrase; add one later with ssh-keygen -p) n: use a key you already have" gh-makekey y; fi ;;
+    gh-keypath)
+      d=$(abs "$a"); p=$(key_problem "$d")
+      [[ -z $p ]] || { ip_reask "$p"; return; }
+      ip_set gh_key "$d"; p_verify ;;
+  esac
+}
+
+p_cancel() {   # esc on a typed question: back to where it was asked
+  case $(ip_get pending) in
+    add) p_to_list ;;
+    claude-add) p_to_acct claude ;;
+    *) p_to_acct github ;;
+  esac
+}
+
+panel() {   # [folders|claude|github] [folder to add]
+  if [[ ! -t 0 || ! -t 1 ]] || ! command -v fzf >/dev/null || ! ui_fzf_at_least 0.63; then
+    cmd_ls
+    [[ -t 1 ]] && ! ui_fzf_at_least 0.63 && info "${C_DIM}The panel needs fzf 0.63 or newer: tk install fzf${C_RESET}"
+    return 0
+  fi
+  IP=$(mktemp -d) || return 1; export IP
+  trap 'rm -rf "$IP"' EXIT
+  : >"$IP/unsaved"; : >"$IP/extras"; ip_set col 1; ip_set mode list
+  [[ -n ${2:-} ]] && echo "$2" >>"$IP/extras"
+  p_cache
+  ip_set focus "${2:-$(head -1 "$IP/cells" | cut -f1)}"
+  local cb k start="unbind(y,n)"
+  cb="$(printf %q "$SELF") __key"
+  [[ ${1:-folders} != folders ]] && start+="+transform($cb open-$1 '' '')"
+  local -a binds=(--bind "start:$start" --bind "focus:transform:$cb focus {1} {q}" --bind "resize:transform:$cb resize {1} {q}"
+    --bind "result:transform:$cb result {1} {q}")
+  for k in enter esc y n left right alt-left alt-right tab alt-s alt-a ctrl-x alt-c alt-g alt-y; do
+    binds+=(--bind "$k:transform:$cb $k {1} {q}")
+  done
+  p_laid "$(ui_cols)" |
+    ui_fzf "hat · folders" --toast --with-shell='bash -c' --delimiter='\t' --with-nth=2 --header-lines=1 --no-sort \
+      --prompt='folder> ' --header="$P_HINTS" --footer=' ' \
+      --preview="$(printf %q "$SELF") __table" --preview-window='right,60%,hidden' \
+      --bind "load:pos($(p_pos_of "$(ip_get focus)"))+unbind(load)" "${binds[@]}" >/dev/null
+  return 0
 }
 
 usage() {
   ui_help hat "which Claude, GitHub and AWS a folder uses" <<'EOF'
-hat	the panel: folders and their hats	enter change · alt-a add a folder · ctrl-x take off
+hat	the panel: every folder wearing a hat	↑↓ folder · alt-←→ column · ←→ change · enter save
 hat ls	every folder with a hat (and this one)
 hat show [folder]	what this folder gets, and from where
-hat set [folder] [claude=…] [github=…] [aws=…]	give a folder a hat; =- goes back to the default	no values: pick them
+hat set [folder] [claude=…] [github=…] [aws=…]	give a folder a hat; =- goes back to the default	no values: the panel, on that folder
 hat off [folder]	take its hats off
-hat claude [add|rm <name>]	Claude profiles (~/.claude-profiles/<name>)
-hat github [add|rm <account>]	GitHub accounts: commit name, email and SSH key
+hat claude [add|rm <name>]	Claude profiles (~/.claude-profiles/<name>)	no word: their list in the panel
+hat github [add|rm <account>]	GitHub accounts: commit name, email and SSH key	added only once GitHub knows the key
 hat help	this page
 
 A hat covers every folder and repo under it. Claude and AWS go in the folder's
 .envrc (direnv); GitHub is a gitdir rule in ~/.gitconfig, so plain git@github.com
 remotes use that account's key. ws ls shows each workspace's hat.
 EOF
+}
+
+cmd_kind() {   # hat claude|github [add <name>|rm <name>|ls]
+  local k=$1; shift
+  case "${1:-}" in
+    add) "${k}_add" "${2:-}" ;;
+    rm|remove) [[ -n ${2:-} ]] || die "Which one? · see: hat $k ls"; "${k}_rm" "$2" ;;
+    "") panel "$k" ;;
+    ls)
+      [[ -t 1 ]] || ui_no_color
+      FZF_COLUMNS=$(ui_cols) p_acct_rows "$k" | cut -f2 | ui_table "hat · $(kind_label "$k")s" ;;
+    *) ui_unknown "hat $k" "$1" ;;
+  esac
 }
 
 case "${1:-}" in
@@ -329,5 +683,16 @@ case "${1:-}" in
   set) shift; cmd_set "$@" ;;
   off) cmd_off "${2:-}" ;;
   claude|github) k=$1; shift; cmd_kind "$k" "$@" ;;
+  # the panel's callbacks (IP is its state folder); a callback has no terminal to go by
+  __*) [[ -z ${NO_COLOR:-} ]] && ui_color ;;&
+  __rows) p_laid ;;
+  __table) p_rows | UI_TABLE_FIELD=2 print_table 2 "$(( ${FZF_PREVIEW_COLUMNS:-60} - 2 ))" | cut -f2- ;;
+  __acctrows) p_acct_rows "$2" ;;
+  __pickrows) p_pick_rows "$2" "$3" ;;
+  __key)
+    case $2 in
+      open-claude|open-github) p_to_acct "${2#open-}" ;;
+      *) p_key "$2" "${3:-}" "${4:-}" ;;
+    esac ;;
   *) ui_unknown hat "$1" ;;
 esac

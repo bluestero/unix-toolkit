@@ -360,14 +360,18 @@ ui_tabs() {
 # column widths, each hint ("key words") starting at its column's left edge. The hints
 # fill the rows in the order given (a tool's own keys first, then the common ones). A
 # warning line (! or !!) stays one line of its own, above the grid.
+# A note line ("# ↑ means …", what marks in the list mean) goes above the keys, grey,
+# with a blank line under it.
 ui_keys() {   # ui_keys <header text> [max divider width]
-  local text="$1" max="${2:-}" line item out="" warn="" row w=0 plain kc wc room i c n cols tot pad
+  local text="$1" max="${2:-}" line item out="" warn="" note="" row w=0 plain kc wc room i c n cols tot pad
   local -a key=() words=() kcol=() wcol=() kw=()
   room=$(ui_header_width)
   if [[ "$text" == *$'\e['* ]]; then out="$text"
   else
     while IFS= read -r line; do   # every hint: key, words, colours
       kc="$C_KEY" wc="$C_WORD"
+      # "# text": a note (what marks in the list mean), grey, on its own above the keys
+      if [[ "$line" == '# '* ]]; then note+="${note:+$'\n'}$C_DIM${line#'# '}$C_RESET"; continue; fi
       if [[ "$line" == '!'* ]]; then   # a warning: one line, amber (! ) or red (!!)
         if [[ "$line" == '!!'* ]]; then line=${line#!!}; kc=$'\e[1;31m' wc=$C_RED
         else line=${line#!}; kc=$'\e[1;33m' wc=$C_YELLOW; fi
@@ -409,6 +413,7 @@ ui_keys() {   # ui_keys <header text> [max divider width]
     done
     out+="${out:+$'\n'}${row%"${row##*[! ]}"}"
     out="${warn:+$warn$'\n'}$out"
+    out="${note:+$note$'\n\n'}$out"
   fi
   # The divider is as wide as the longest hint line (and fits beside a pane).
   while IFS= read -r line; do plain=$(strip_ansi "$line"); (( ${#plain} > w )) && w=${#plain}; done <<<"$out"
