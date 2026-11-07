@@ -272,6 +272,27 @@ cmd_layer() {
   esac
 }
 
+# ------------------------------------------------------------ guidelines ---
+# The coding guidelines are a vendored copy (claude/guidelines/karpathy.md);
+# refresh downloads the upstream file, shows what changed, and replaces the copy
+# only when you say so. Then: tk install claude-guidelines to apply it.
+GUIDE_URL="https://raw.githubusercontent.com/multica-ai/andrej-karpathy-skills/main/CLAUDE.md"
+cmd_guidelines() {
+  case "${1:-}" in
+    refresh) ;;
+    *) ui_unknown "tk guidelines" "${1:-}"; return ;;
+  esac
+  local mine="$ROOT/claude/guidelines/karpathy.md" tmp; tmp=$(mktemp)
+  curl -fsSL "$GUIDE_URL" -o "$tmp" || { rm -f "$tmp"; die "couldn't download $GUIDE_URL"; }
+  if cmp -s "$tmp" "$mine"; then rm -f "$tmp"; ok "guidelines: already up to date"; return 0; fi
+  diff -u --label "now" --label "upstream" "$mine" "$tmp" | sed 's/^/  /' >&2
+  if confirm "Replace the vendored copy with the upstream one? (review the changes above first)" n; then
+    cat "$tmp" >"$mine"; ok "updated ${mine/#$HOME/\~}"
+    info "${C_DIM}Commit it, then apply with: tk install claude-guidelines${C_RESET}"
+  else info "Kept."; fi
+  rm -f "$tmp"
+}
+
 cmd_help() {
   ui_help tk "the work toolkit" <<'EOF'
 ## Commands
@@ -285,6 +306,7 @@ tk update	pull the latest toolkit and layers, show what changed, set up anything
 tk layer [ls]	the layers: extra parts from other repos, in layers/<name>
 tk layer add <git-url> [name]	clone a layer, then offer to set up its parts	name: repo name without -toolkit
 tk layer rm <name>	delete a layer (only when nothing in it is unpushed)
+tk guidelines refresh	fetch the upstream coding guidelines, show the diff, replace the vendored copy if you agree	apply with tk install claude-guidelines
 tk version	the toolkit version (also -v, --version)
 tk help	this page
 
@@ -301,6 +323,7 @@ case "${1:-}" in
   uninstall)      shift; exec "$ROOT/uninstall.sh" "$@" ;;
   update)         cmd_update ;;
   layer|layers)   shift; cmd_layer "$@" ;;
+  guidelines)     shift; cmd_guidelines "$@" ;;
   version|-v|--version) cmd_version ;;
   help|-h|--help) cmd_help ;;
   *)              ui_unknown tk "$1" ;;

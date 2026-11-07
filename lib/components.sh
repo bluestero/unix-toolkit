@@ -15,13 +15,13 @@
 # shellcheck source=platform.sh
 . "$repo/lib/platform.sh"
 
-COMPONENTS=(bash keys commands starship fzf kitty kitty-config kitty-bg kitty-theme kitty-accents kitty-icons kitty-nautilus kitty-centered zsh login-shell btop yazi window-calls alt-tab-desktop dash2dock dash-to-panel hide-docker-tray app-keys no-animations vitals-icons rofi eks-clusters repos claude-skill claude-hook)
+COMPONENTS=(bash keys commands starship fzf kitty kitty-config kitty-bg kitty-theme kitty-accents kitty-icons kitty-nautilus kitty-centered zsh login-shell btop yazi window-calls alt-tab-desktop dash2dock dash-to-panel hide-docker-tray app-keys no-animations vitals-icons rofi eks-clusters repos claude-skill claude-hook claude-guidelines)
 # Shown in groups in the checklist; the rest are optional extras.
 RECOMMENDED=(bash keys commands starship fzf)
 KITTY_PARTS=(kitty kitty-config kitty-bg kitty-theme kitty-accents kitty-icons kitty-nautilus kitty-centered)
 DESKTOP_PARTS=(window-calls alt-tab-desktop dash2dock dash-to-panel hide-docker-tray app-keys no-animations vitals-icons rofi)
 WORKSPACE_PARTS=(repos)
-CLAUDE_PARTS=(claude-skill claude-hook)
+CLAUDE_PARTS=(claude-skill claude-hook claude-guidelines)
 CLOUD_PARTS=(eks-clusters)
 group_of() {
   # a layer's component names its own group (group_<id>)
@@ -1283,6 +1283,55 @@ state_claude_hook() { NOTE=""
 install_claude_hook() { ch_json has 2>/dev/null && { ok "already there"; return; }
   ask "Add the start hook to ${ch_settings/#$HOME/\~}? (runs ${C}ctx plain${R} when a session opens)" && { dry || ch_write add; } || skip; }
 uninstall_claude_hook() { ch_json has 2>/dev/null || { ok "not there"; return 0; }; ch_write remove; }
+
+# The coding guidelines (claude/guidelines/karpathy.md, a vendored copy; refresh
+# it with `tk guidelines refresh`) live in the user-level CLAUDE.md as one block
+# between markers, so everything outside the markers stays yours.
+cg_src="$repo/claude/guidelines/karpathy.md"
+cg_file="$claude_dir/CLAUDE.md"
+cg_json() {   # cg_json has|add|remove  (has: block there and current; add/remove print the new file)
+  python3 -I - "$cg_file" "$cg_src" "$1" <<'PY'
+import os, re, sys
+path, src, op = sys.argv[1:]
+S, E = "<!-- tk:karpathy-guidelines:start -->", "<!-- tk:karpathy-guidelines:end -->"
+lines = open(src).read().splitlines()
+lines[0] = "# Coding guidelines (andrej-karpathy-skills)"
+block = S + "\n" + "\n".join(lines).rstrip() + "\n" + E
+text = open(path).read() if os.path.exists(path) else ""
+pat = re.compile(re.escape(S) + r".*?" + re.escape(E), re.S)
+if op == "has":
+    m = pat.search(text)
+    sys.exit(0 if m and m.group(0) == block else 1)
+rest = pat.sub("", text).strip("\n")
+if op == "add":
+    # keep the block where it was; otherwise append it
+    out = pat.sub(lambda _: block, text, count=1) if pat.search(text) else (rest + "\n\n" if rest else "") + block + "\n"
+else:
+    out = rest + "\n" if rest else ""
+sys.stdout.write(out)
+PY
+}
+cg_write() {   # cg_write add|remove
+  local tmp b; tmp=$(mktemp)
+  cg_json "$1" >"$tmp" || { rm -f "$tmp"; fail "couldn't update ${cg_file/#$HOME/\~}"; return 1; }
+  mkdir -p "$claude_dir"; b=$(backup "$cg_file")
+  if [[ -s "$tmp" ]]; then cat "$tmp" >"$cg_file"; else rm -f "$cg_file"; fi
+  rm -f "$tmp"
+  logf "  $1 coding guidelines in $cg_file${b:+ (backup: $b)}"
+  ok "done${b:+ (backup: ${b/#$HOME/\~})}"
+}
+cg_present() { [[ -f "$cg_file" ]] && grep -q 'tk:karpathy-guidelines:start' "$cg_file"; }
+label_claude_guidelines() { echo "Claude guidelines"; }
+title_claude_guidelines() { echo "Claude Code follows the same coding guidelines in every project (think first, keep it simple, small diffs)"; }
+detail_claude_guidelines() { echo "one marked block in ${cg_file/#$HOME/\~}; the rest of that file is left alone"; }
+state_claude_guidelines() { NOTE=""
+  command -v claude >/dev/null || [[ -d "$claude_dir" ]] || { STATE=n/a; NOTE="Claude Code isn't installed"; return; }
+  if cg_json has 2>/dev/null; then STATE=installed
+  elif cg_present; then STATE=partial; NOTE="out of date"
+  else STATE=missing; fi; }
+install_claude_guidelines() { cg_json has 2>/dev/null && { ok "already there"; return; }
+  ask "$(cg_present && echo Update || echo Add) the coding guidelines in ${cg_file/#$HOME/\~}? (every Claude Code project)" && { dry || cg_write add; } || skip; }
+uninstall_claude_guidelines() { cg_present || { ok "not there"; return 0; }; cg_write remove; }
 
 # -------------------------------------------------------------- layers ---
 # Each layer's own components (lib/layers.sh), after the toolkit's.

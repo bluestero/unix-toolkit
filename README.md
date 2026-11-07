@@ -105,6 +105,7 @@ Copying a folder into `layers/` works too (no updates then). Everything in a lay
 | `tools` | commands for `tk ls` and the `tk` picker: `name\|group\|what it does\|program it needs` |
 | `workspaces` | a shared `ws` list; `@<name>` in your own list brings it in |
 | `claude/skills/<skill>/` | Claude Code skills, linked by the `claude-skill` component |
+| `claude/guidelines/` | Vendored coding guidelines, merged into `CLAUDE.md` by the `claude-guidelines` component |
 
 `lib/layers.sh` has the same list for whoever writes one.
 
@@ -177,6 +178,7 @@ The first time the installer changes something of yours, it keeps what you had i
 | `repos` | Checks `ssh -T git@github.com`, then clones the repos in your workspace list that are missing: your layers' shared lists plus your own (checklist, all ticked). Creates your list (`~/.config/ws/workspaces`) if needed. Never deletes clones. |
 | `claude-skill` | Links `claude/skills/work-toolkit` (and each layer's skills) into Claude Code's skills (`$CLAUDE_CONFIG_DIR`, else `~/.claude`), so Claude knows okcli, kx, ctx and the rest in every repo: run AWS and kubectl through `okcli exec` / `kx exec` / `direnv exec`, and ask before prod changes or defaults |
 | `claude-hook` | Adds a SessionStart hook to Claude Code's `settings.json` that runs `ctx plain`, so every session starts knowing the AWS profile (and if it's PROD), the repo pin and the cluster. Only that one entry is added or removed; the rest of the file is kept |
+| `claude-guidelines` | Adds the coding guidelines (`claude/guidelines/karpathy.md`, a vendored copy of andrej-karpathy-skills' `CLAUDE.md`) to Claude Code's user-level `CLAUDE.md` (`$CLAUDE_CONFIG_DIR`, else `~/.claude`), so they apply in every project. Only the block between the `tk:karpathy-guidelines` markers is added, updated or removed; the rest of the file is kept. `tk guidelines refresh` fetches upstream and shows the diff before replacing the copy |
 
 ## zsh
 
