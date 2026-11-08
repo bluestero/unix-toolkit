@@ -34,25 +34,32 @@ but not these. Install the ones for the tools you'll use:
 | `twin` | the [Twingate client](https://www.twingate.com/download) |
 | the prompt | [starship](https://starship.rs) |
 
-**2. Install.** One command: it clones the toolkit into `~/.local/share/unix-toolkit` (or updates
-it if it's there) and starts the installer. Everything is ticked, so Enter sets it all up; untick
-what you don't want. Each change still asks first (Enter = yes).
+**2. Get it.** One command: it clones the toolkit into `~/.local/share/unix-toolkit` (or updates
+it if it's there) and adds the `tk` command. Nothing else changes yet.
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/bluestero/unix-toolkit/main/bootstrap.sh)
 ```
 
-Your company has a layer? Add `--layer <its git URL>` (repeat for several) and its parts are in
-the same checklist. `--dir <folder>` puts the toolkit elsewhere. Or clone it yourself, anywhere,
-and run `./install.sh`: the installer records where it is.
+`--dir <folder>` puts the toolkit elsewhere. Or clone it yourself, anywhere, and run
+`./install.sh`: the installer records where it is.
 
-**3. Open a new terminal and check.** `tk doctor` lists anything left, each with the command that fixes it.
+**3. Install.** A checklist of every part, all ticked, so Enter sets it all up; untick what you
+don't want. Each change still asks first (Enter = yes).
+
+```bash
+tk install
+```
+
+Your company has a [layer](#layers)? `tk layer add <its git URL>` adds it and offers to set up its parts.
+
+**4. Open a new terminal and check.** `tk doctor` lists anything left, each with the command that fixes it.
 
 ```bash
 tk doctor
 ```
 
-**4. First run of each tool:**
+**5. First run of each tool:**
 
 | Command | Does |
 |---|---|
@@ -266,5 +273,5 @@ shell/common.sh             personal aliases, PATH, env, dex, nvm (both shells)
 shell/inputrc               bash key settings
 zsh/zshrc                   zsh setup
 install.sh / uninstall.sh   set up / remove, per component
-bootstrap.sh                the one-command install (clone or pull, add layers, run install.sh)
+bootstrap.sh                the one-command download (clone or pull, add the tk command)
 ```
