@@ -556,32 +556,36 @@ look_reset() {   # look_reset PATH NAME: the app's defaults, or your settings fr
   rm -f "$f" "$orig_dir/$2.last.dconf"
 }
 # look_menu PATH FILE NAME NICE [IGNORE]: what to do with the settings of an extension that
-# is already installed: keep, re-apply the toolkit look, reset to the app's defaults, or (when
-# a copy exists) undo the last change. The settings from just before a change are kept once.
+# is already installed: keep, re-apply the toolkit look, reset to the app's defaults, put back
+# the settings from before the toolkit, or (when a copy exists) undo the last change. Each says
+# how many settings it changed; the settings from just before a change are kept once.
 look_menu() {
-  local path=$1 file=$2 name=$3 nice=$4 ign=${5:-} last="$orig_dir/$3.last.dconf" state pick q rows
+  local path=$1 file=$2 name=$3 nice=$4 ign=${5:-} last="$orig_dir/$3.last.dconf" first="$orig_dir/$3.dconf" state pick q rows before
   local keep="Keep my settings" app="Re-apply the toolkit look" rst="Reset to the app's defaults" und="Undo the last change"
+  local pre="Put back my settings from before the toolkit"
   if look_applied "$path" "$file" "$ign"; then state="match the toolkit look"; else state="differ from the toolkit look"; fi
   case "$mode" in
     dry) say "  ${C}?${R} $nice settings $state ${D}(dry run: not asked)${R}"; return 0 ;;
     yes) look_applied "$path" "$file" "$ign" && { ok "look already applied"; return 0; }; pick=$app ;;
     *)
       if ! command -v fzf >/dev/null || [[ ! -t 0 ]]; then ok "$nice settings kept"; return 0; fi
-      rows="$keep"$'
-'"$app"$'
-'"$rst"; [[ -f $last ]] && rows+=$'
-'"$und"
+      rows="$keep"$'\n'"$app"$'\n'"$rst"; grep -q = "$first" 2>/dev/null && rows+=$'\n'"$pre"; [[ -f $last ]] && rows+=$'\n'"$und"
       q="${C_BOLD}$nice settings $state${C_RESET}"
-      pick=$(printf '%s
-' "$rows" | ui_fzf "${UI_CONFIRM_LABEL:-settings}" --height=~60% --info=hidden         --no-separator --prompt='  ' --header="$q") || pick=$keep ;;
+      pick=$(printf '%s\n' "$rows" | ui_fzf "${UI_CONFIRM_LABEL:-settings}" --height=~60% --info=hidden \
+        --no-separator --prompt='  ' --header="$q") || pick=$keep ;;
   esac
+  before=$(dconf dump "$path" 2>/dev/null)
   case "$pick" in
-    "$app") mkdir -p "$orig_dir"; dconf dump "$path" >"$last" 2>/dev/null
-            look_apply "$path" "$file" "$name" && ok "$nice look applied ${D}(the menu can undo it)${R}" ;;
+    "$app") mkdir -p "$orig_dir"; printf '%s\n' "$before" >"$last"
+            look_apply "$path" "$file" "$name" && ok "$nice look applied ${D}($(look_note "$path" "$before"); the menu can undo it)${R}" ;;
     "$rst") ask "Reset $nice to the app's defaults? (the menu can undo it)" n || { skip; return 0; }
-            mkdir -p "$orig_dir"; dconf dump "$path" >"$last" 2>/dev/null
-            dconf reset -f "$path" && ok "$nice settings back to the app's defaults ${D}(the menu can undo it)${R}" ;;
-    "$und") dconf reset -f "$path"; dconf load "$path" <"$last" && rm -f "$last" && ok "$nice settings back to before the last change" ;;
+            mkdir -p "$orig_dir"; printf '%s\n' "$before" >"$last"
+            dconf reset -f "$path" && ok "$nice settings back to the app's defaults ${D}($(look_note "$path" "$before"); the menu can undo it)${R}" ;;
+    "$pre") mkdir -p "$orig_dir"; printf '%s\n' "$before" >"$last"
+            dconf reset -f "$path"; dconf load "$path" <"$first" &&
+              ok "$nice settings back to how they were before the toolkit ${D}($(look_note "$path" "$before"); the menu can undo it)${R}" ;;
+    "$und") dconf reset -f "$path"; dconf load "$path" <"$last" && rm -f "$last" &&
+              ok "$nice settings back to before the last change ${D}($(look_note "$path" "$before"))${R}" ;;
     *) ok "$nice settings kept" ;;
   esac
 }
