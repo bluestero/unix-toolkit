@@ -16,11 +16,15 @@
 #                                             in red, the typed text kept to fix
 #   ip_answer <key>                           in confirm mode: yes / no / "" (not an answer)
 # In a sortable picker (ui_fzf --sortable) the question's header goes through
-# ui_sort_header, so the column titles stay under it.
+# ui_sort_keys, so the column titles stay under it and a resize wraps the keys again.
+# A list can bring its own storage and extras by defining, before it asks:
+#   ip_get <name> / ip_set <name> <value>   where the state lives (kx's lists keep it in their vars file)
+#   ip_top                                  a line shown above every question (kx: the PROD badge)
+#   IP_MAX                                  with a preview pane: the width the divider may reach
 # A question's actions bind y and n; the list's start should unbind them
 # (--bind start:unbind\(y,n\)) and its way back rebind nothing: ip_back does that part.
 
-ip_get() { cat "$IP/$1" 2>/dev/null; }
+ip_get() { local v=""; [[ -r $IP/$1 ]] && IFS= read -r -d '' v <"$IP/$1"; printf '%s' "$v"; }
 ip_set() { printf '%s' "$2" >"$IP/$1"; }
 
 # fzf action with a text argument (brackets the text doesn't contain), and + joins
@@ -29,26 +33,28 @@ ip_join() { local IFS=+; printf '%s' "$*"; }
 
 # the header while asking: an optional line on top (a red reason), the question in
 # amber (folded to the window), then its keys
-ip_header() {   # question keys [line on top]
-  local out=""
-  [[ -n ${3:-} ]] && out+="$3"$'\n'
-  out+=$(fold -s -w $(( ${FZF_COLUMNS:-$(ui_cols)} - 8 )) <<<"$1" | sed "s/^/${C_YELLOW}${C_BOLD}/; s/\$/${C_RESET}/")
-  printf '%s\n%s' "$out" "$(ui_keys "$2")"
+ip_top() { :; }
+ip_header() {   # question keys [line above the question]
+  local above q
+  above=$(ip_top)
+  [[ -n ${3:-} ]] && above+="${above:+$'\n'}$3"
+  q=$(fold -s -w $(( ${FZF_COLUMNS:-$(ui_cols)} - 8 )) <<<"$1" | sed "s/^/${C_YELLOW}${C_BOLD}/; s/\$/${C_RESET}/")
+  ui_sort_keys "$2" "${above:+$above$'\n'}$q" "${IP_MAX:-}"
 }
 
-ip_confirm() {   # question pending [default y|n]
+ip_confirm() {   # question pending [default y|n] [line above the question]
   local d=${3:-n} keys clear=""
   # straight after a typed question: its answer leaves the prompt, the list filters again
-  [[ $(ip_get mode) == ask ]] && clear="$(ip_fz change-query "")+enable-search"
+  [[ $(ip_get mode) == ask ]] && clear="$(ip_fz change-query "$(ip_get saved_q)")+enable-search"
   ip_set mode confirm; ip_set pending "$2"; ip_set question "$1"; ip_set default "$d"
   if [[ $d == y ]]; then keys="y: yes (enter too) · n: no (esc too)"; else keys="y: yes · n: no (enter, esc too)"; fi
-  ip_join "$(ip_fz change-header "$(ui_sort_header "$(ip_header "$1" "$keys")")")" \
+  ip_join "$(ip_fz change-header "$(ip_header "$1" "$keys" "${4:-}")")" \
     "$(ip_fz change-prompt "${C_YELLOW}y / n? ${C_RESET}")" "rebind(y,n)" "$(ip_fz change-footer " ")" ${clear:+"$clear"}
 }
 
-ip_ask() {   # question pending [prefill] [prompt]
+ip_ask() {   # question pending [prefill] [prompt] [line above the question]
   ip_set mode ask; ip_set pending "$2"; ip_set question "$1"
-  ip_join "$(ip_fz change-header "$(ui_sort_header "$(ip_header "$1" "enter: ok · esc: cancel")")")" \
+  ip_join "$(ip_fz change-header "$(ip_header "$1" "enter: ok · esc: cancel" "${5:-}")")" \
     "$(ip_fz change-prompt "${C_YELLOW}${4:-> }${C_RESET}")" disable-search "unbind(y,n)" \
     "$(ip_fz change-query "${3:-}")" "$(ip_fz change-footer " ")"
 }
@@ -56,7 +62,7 @@ ip_ask() {   # question pending [prefill] [prompt]
 ip_reask() {   # why the answer didn't work
   local keys="enter: ok · esc: cancel"
   [[ $(ip_get mode) == confirm ]] && keys="y: yes · n: no (enter, esc too)"
-  ip_fz change-header "$(ui_sort_header "$(ip_header "$(ip_get question)" "$keys" "${C_RED}✗ $1${C_RESET}")")"
+  ip_fz change-header "$(ip_header "$(ip_get question)" "$keys" "${C_RED}✗ $1${C_RESET}")"
 }
 
 ip_answer() {   # key → yes / no / nothing

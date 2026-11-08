@@ -11,6 +11,8 @@ SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 ROOT="$(cd "$(dirname "$SELF")/../.." && pwd)"
 # shellcheck source=../../lib/ui.sh
 . "$ROOT/lib/ui.sh"
+# shellcheck source=../../lib/inplace.sh
+. "$ROOT/lib/inplace.sh"
 UI_EVAL_FILE="${OKCLI_EVAL_FILE:-}"
 
 OKCLI_VERSION="1.1.0"
@@ -224,24 +226,53 @@ pick_profile() {
       is_prod "$name" "$label" || { pos=$i; break; }
     done < <(profiles_tsv)
   fi
-  out=$(printf '%s\n' "$table" | ui_fzf 'okcli · aws profiles' --sortable --header-lines=1 --prompt='profile> ' \
-    --header="$header" --expect=ctrl-r,ctrl-d --bind="load:pos(${pos:-1})") || return 1
-  key=$(sed -n 1p <<<"$out")
-  sel=$(strip_ansi "$(sed -n 2p <<<"$out")" | awk '{ print ($1 == "●") ? $2 : $1 }')
-  [[ -n "$sel" ]] && printf '%s\t%s\n' "${key:-enter}" "$sel"
+  # enter / ctrl-r / ctrl-d run `okcli __gate`: a question (expired login, PROD default)
+  # opens in this list's header and the list closes only on the answer (lib/inplace.sh).
+  IP=$(mktemp -d) || return 1; export IP
+  ip_set mode list; ip_set hints "$header"
+  local cb k; cb="$(printf %q "$SELF") __gate"
+  local -a binds=(--bind "start:unbind(y,n)")
+  for k in enter ctrl-r ctrl-d y n esc; do binds+=(--bind "$k:transform:$cb $k {}"); done
+  ui_fzf 'okcli · aws profiles' --sortable --header-lines=1 --prompt='profile> ' --with-shell='bash -c' \
+    --header="$header" --bind="load:pos(${pos:-1})" "${binds[@]}" <<<"$table" >/dev/null
+  key=$(ip_get key); sel=$(ip_get sel); answer=$(ip_get answer)
+  rm -rf "$IP"
+  [[ -n "$sel" ]] && printf '%s\t%s\t%s\n' "$key" "$sel" "$answer"
+}
+
+# The list's keys (a callback has no terminal): prints fzf actions.
+cmd_gate() {   # key row
+  local k=$1 name; name=$(strip_ansi "$2" | awk '{ print ($1 == "●") ? $2 : $1 }')
+  if [[ $(ip_get mode) == confirm ]]; then
+    local a; a=$(ip_answer "$k"); [[ -n $a ]] || return 0
+    ip_set answer "$a"; echo accept; return
+  fi
+  [[ $k == esc ]] && { echo abort; return; }
+  [[ -n $name ]] || return 0
+  ip_set key "$k"; ip_set sel "$name"
+  case $k in
+    enter) if ! is_fresh "$name"; then ip_confirm "Credentials for '$name' are expired or missing. Refresh now?" refresh y; return; fi ;;
+    ctrl-d) local row label; row=$(profile_row "$name") && { IFS=$'\t' read -r _ _ label _ _ _ <<<"$row"
+              if is_prod "$name" "$label"; then ip_confirm "'$name' is a PROD profile: every new terminal would start in prod. Make it the default anyway?" default n; return; fi; } ;;
+  esac
+  echo accept
 }
 
 cmd_pick() {
   if [[ ! -t 1 || ! -t 0 ]] || ! command -v fzf >/dev/null; then cmd_ls; return; fi
   local picked key name
   picked=$(pick_profile "enter: switch · ctrl-r: refresh + switch · ctrl-d: make default · esc: cancel") || return 0
-  key=${picked%%$'\t'*}; name=${picked#*$'\t'}
+  [[ -n $picked ]] || return 0
+  IFS=$'\t' read -r key name OKCLI_ANSWER <<<"$picked"; export OKCLI_ANSWER   # what the list already asked
   case "$key" in
     ctrl-d) set_default "$name"; return ;;
-    ctrl-r) refresh_profiles "$name" ;;
+    ctrl-r) refresh_profiles "$name"; OKCLI_ANSWER=no ;;   # a failed refresh isn't asked about again
   esac
   do_switch "$name"
 }
+
+# confirm, unless the picker already asked (OKCLI_ANSWER: yes / no)
+ask() { if [[ -n ${OKCLI_ANSWER:-} ]]; then [[ $OKCLI_ANSWER == yes ]]; else confirm "$@"; fi; }
 
 do_switch() {
   local name="$1" row label role acct var
@@ -249,7 +280,7 @@ do_switch() {
   IFS=$'\t' read -r _ acct label role _ _ <<<"$row"
 
   if ! is_fresh "$name"; then
-    if confirm "Credentials for '$name' are expired or missing. Refresh now?"; then
+    if ask "Credentials for '$name' are expired or missing. Refresh now?"; then
       refresh_profiles "$name" || warn "Refresh failed; switching anyway."
     fi
   fi
@@ -286,7 +317,7 @@ set_default() {
   IFS=$'\t' read -r _ _ label _ _ _ <<<"$row"
   if is_prod "$name" "$label"; then
     warn "'$name' is a ${C_RED}${C_BOLD}PROD${C_RESET} profile: every new terminal would start in prod."
-    confirm "Make it the default anyway?" n || { info "Default unchanged."; return 1; }
+    ask "Make it the default anyway?" n || { info "Default unchanged."; return 1; }
   fi
   mkdir -p "$STATE_DIR" && printf '%s\n' "$name" >"$DEFAULT_FILE"
   ok "Default is now ${C_BOLD}$name${C_RESET}. New terminals start on it."
@@ -956,6 +987,7 @@ main() {
     env)             cmd_env "$@" ;;
     doctor)          cmd_doctor ;;
     help|-h|--help)  cmd_help "$@" ;;
+    __gate)          ui_color; cmd_gate "$@" ;;
     __names)         profile_names ;;
     __profiles)      profiles_tsv ;;
     __accounts)      accounts_tsv ;;

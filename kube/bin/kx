@@ -19,6 +19,8 @@ ROOT="$(cd "$(dirname "$SELF")/../.." && pwd)"
 . "$ROOT/kube/lib/resources.sh"
 # shellcheck source=../lib/list.sh
 . "$ROOT/kube/lib/list.sh"
+# shellcheck source=../../lib/inplace.sh
+. "$ROOT/lib/inplace.sh"
 UI_EVAL_FILE="${KX_EVAL_FILE:-}"
 
 KX_VERSION="1.1.0"
@@ -200,13 +202,72 @@ pick_ctx() {
   if [[ -z "$pos" ]]; then   # never start the cursor on prod
     pos=$(ctx_names | awk -v pat="$NONPROD_PATTERN" '$0 ~ pat { print NR; exit }')
   fi
-  out=$(printf '%s\n' "$table" | ui_fzf 'kx · kubernetes' --sortable --header-lines=1 --prompt='context> ' \
-    --header="$header" --expect=alt-enter,ctrl-x --bind="$(ui_live_onload "${pos:-1}")" \
-    --live-rows="$(printf %q "$SELF") __ctxrows" --toast \
-    --bind="ctrl-d:transform:$(printf %q "$SELF") __pickdef {n} {}") || return 1
-  key=$(sed -n 1p <<<"$out")
-  sel=$(strip_ansi "$(sed -n 2p <<<"$out")" | awk '{ print ($1 == "●") ? $2 : $1 }')
-  [[ -n "$sel" ]] && printf '%s\t%s\n' "${key:-enter}" "$sel"
+  # enter / alt-enter / ctrl-x / ctrl-d run `kx __gate`: a question (expired login, PROD
+  # default) opens in this list's header and the list stays open (lib/inplace.sh).
+  IP=$(mktemp -d) || return 1; export IP
+  ip_set mode list; ip_set hints "$header"
+  local cb k; cb="$(printf %q "$SELF") __gate"
+  local -a binds=(--bind "start:unbind(y,n)")
+  for k in enter alt-enter ctrl-x ctrl-d y n esc; do binds+=(--bind "$k:transform:$cb $k {n} {} {q}"); done
+  ui_fzf 'kx · kubernetes' --sortable --header-lines=1 --prompt='context> ' --with-shell='bash -c' \
+    --header="$header" --bind="$(ui_live_onload "${pos:-1}")" \
+    --live-rows="$(printf %q "$SELF") __ctxrows" --toast "${binds[@]}" <<<"$table" >/dev/null
+  key=$(ip_get key); sel=$(ip_get sel); answer=$(ip_get answer)
+  rm -rf "$IP"
+  [[ -n "$sel" ]] && printf '%s\t%s\t%s\n' "$key" "$sel" "$answer"
+}
+
+# kx sync's list: enter applies; unticked clusters that are added already are
+# removed, which is asked here (rows in $IP/rows: alias, cluster, status).
+cmd_syncgate() {   # key ticked-rows...
+  local k=$1 a c alias cluster status drop="" chosen; shift
+  if [[ $(ip_get mode) == confirm ]]; then
+    a=$(ip_answer "$k"); [[ -n $a ]] || return 0
+    ip_set answer "$a"; echo accept; return
+  fi
+  [[ $k == esc ]] && { echo abort; return; }
+  chosen=$(for c in "$@"; do strip_ansi "$c" | awk '{ print $2 }'; done)
+  printf '%s\n' "$chosen" >"$IP/chosen"
+  while IFS=$'\t' read -r alias cluster status; do
+    [[ $status == added ]] && ! grep -qxF "$cluster" <<<"$chosen" && drop+="$alias "
+  done <"$IP/rows"
+  if [[ -n $drop ]]; then ip_confirm "Remove ${drop}from $BASE_FILE (unticked)?" drop n; return; fi
+  echo accept
+}
+
+# The list's keys (a callback has no terminal): prints fzf actions.
+cmd_gate() {   # key position row query
+  local k=$1 pos=$2 name row cluster user ns prof
+  if [[ $(ip_get mode) == confirm ]]; then
+    local a; a=$(ip_answer "$k"); [[ -n $a ]] || return 0
+    if [[ $(ip_get pending) == refresh ]]; then ip_set answer "$a"; echo accept; return; fi
+    # the default question: answer it, then back to the list on the same row
+    name=$(ip_get cname)
+    [[ $a == yes ]] && KX_ANSWER=yes set_default "$name" >/dev/null 2>&1
+    ip_join "$(ip_back)" "$(ip_fz change-header "$(ui_sort_keys "$(ip_get hints)")")" "$(ip_fz change-prompt 'context> ')" \
+      "transform($SELF __toast ctx $(printf %q "$name"))" "$(ui_live_reload "$(ip_get cpos)")"
+    return
+  fi
+  [[ $k == esc ]] && { echo abort; return; }
+  name=$(strip_ansi "$3" | awk '{ print ($1 == "●") ? $2 : $1 }')
+  [[ -n "$name" ]] || return 0
+  ip_set saved_q "$4"
+  case $k in
+    ctrl-d)
+      if is_prod "$name"; then
+        ip_set cname "$name"; ip_set cpos "$pos"
+        ip_confirm "'$name' is a PROD cluster: every shell that hasn't switched would point at it. Make it the default anyway?" default n
+      else pick_default "$pos" "$3"; fi
+      return ;;
+    enter|alt-enter)
+      row=$(ctx_row "$name") && IFS=$S read -r _ cluster user ns prof _ _ _ <<<"$row"
+      if [[ -n "${prof:-}" ]] && has_okcli && ! profile_fresh "$prof"; then
+        ip_set key "$k"; ip_set sel "$name"
+        ip_confirm "AWS credentials for '$prof' (used by $name) are expired. Refresh now?" refresh y; return
+      fi ;;
+  esac
+  ip_set key "$k"; ip_set sel "$name"
+  echo accept
 }
 
 # ---------------------------------------------------------------- actions ---
@@ -246,6 +307,9 @@ prune_overlays() {
   done
 }
 
+# confirm, unless the picker already asked (KX_ANSWER: yes / no)
+ask() { if [[ -n ${KX_ANSWER:-} ]]; then [[ $KX_ANSWER == yes ]]; else confirm "$@"; fi; }
+
 do_switch() {
   local name="$1" ns_override="${2-__keep__}" row cluster user ns prof cur
   row=$(ctx_row "$name") || die "No context named '$name' · see: kx ls"
@@ -255,7 +319,7 @@ do_switch() {
   cur=$(current_ctx)
 
   if [[ -n "$prof" ]] && has_okcli && ! profile_fresh "$prof"; then
-    if confirm "AWS credentials for '$prof' (used by $name) are expired. Refresh now?"; then
+    if ask "AWS credentials for '$prof' (used by $name) are expired. Refresh now?"; then
       okcli refresh "$prof" || warn "Refresh failed; switching anyway."
     fi
   fi
@@ -273,8 +337,7 @@ do_switch() {
 pick_default() {   # row-position row-text
   local name; name=$(strip_ansi "$2" | awk '{ print ($1 == "●") ? $2 : $1 }')
   [[ -n "$name" ]] || return 0
-  if is_prod "$name"; then printf 'execute(%s __setdef %q)+' "$SELF" "$name"
-  else printf 'execute-silent(%s __setdef %q)+' "$SELF" "$name"; fi
+  printf 'execute-silent(%s __setdef %q)+' "$SELF" "$name"
   printf 'transform(%s __toast ctx %q)+' "$SELF" "$name"
   ui_live_reload "$1"
 }
@@ -311,7 +374,8 @@ cmd_pick() {
   picked=$(pick_ctx "enter: switch · alt-enter: switch + namespace · ctrl-d: make default · ctrl-x: hide · esc: cancel") || rc=$?
   [[ "$(default_ctx)" == "$def0" ]] || keep_here "$cur0" "$ns0"
   (( rc )) && return 0
-  key=${picked%%$'\t'*}; name=${picked#*$'\t'}
+  [[ -n $picked ]] || return 0
+  IFS=$'\t' read -r key name KX_ANSWER <<<"$picked"; export KX_ANSWER   # what the list already asked
   case "$key" in
     ctrl-x) cmd_ignore "$name" ;;
     alt-enter) do_switch "$name" && KUBECONFIG="$SHELL_FILE:$BASE" cmd_ns ;;
@@ -369,7 +433,7 @@ set_default() {
   require_ctx "$name"
   if is_prod "$name"; then
     warn "'$name' is a ${C_RED}${C_BOLD}PROD${C_RESET} cluster: every shell that hasn't switched would point at it."
-    confirm "Make it the default anyway?" n || { info "Default unchanged."; return 1; }
+    ask "Make it the default anyway?" n || { info "Default unchanged."; return 1; }
   fi
   KUBECONFIG="$BASE" kubectl config use-context "$name" >/dev/null || die "Couldn't set the default."
   ok "Default is now ${C_BOLD}$name${C_RESET}. New terminals (and shells you haven't switched) use it."
@@ -726,7 +790,7 @@ cmd_sync() {
 
   # 3. Cluster checklist: everything ticked but ignored clusters. Unticking an
   #    added one removes it; unticked ones are skipped from now on.
-  local ctxs rows S2=$'\x1f' alias status table chosen have bind="" i=0
+  local ctxs rows S2=$'\x1f' alias status table chosen have bind="" i=0 asked=""
   ctxs=$(ctx_rows | awk -F"$S" '$6 != "" { print $6 "\t" $1 }')   # eks-cluster<TAB>context
   rows=""
   while IFS=$'\t' read -r acct label region c p; do
@@ -742,9 +806,18 @@ cmd_sync() {
     printf '%s' "$rows" | sed "s/${S2}new${S2}/${S2}${C_CYAN}new${C_RESET}${S2}/; s/${S2}\(added\|ignored\)${S2}/${S2}${C_DIM}\1${C_RESET}${S2}/"
   })
   if (( interactive )); then
-    chosen=$(printf '%s\n' "$table" | ui_fzf 'kx sync · which clusters?' --sortable --multi --marker='✓' --header-lines=1 \
+    # enter runs `kx __syncgate`: removing unticked contexts is asked in this list's header
+    IP=$(mktemp -d) || return 1; export IP
+    ip_set mode list
+    printf '%s' "$rows" | awk -F"$S2" '{ print $1 "\t" $2 "\t" $6 }' >"$IP/rows"
+    local cb k; cb="$(printf %q "$SELF") __syncgate"
+    local -a gbinds=(--bind "start:unbind(y,n)")
+    for k in enter y n esc; do gbinds+=(--bind "$k:transform:$cb $k {+}"); done
+    ui_fzf 'kx sync · which clusters?' --sortable --multi --marker='✓' --header-lines=1 --with-shell='bash -c' \
       --prompt='filter> ' --header='tab: tick/untick · ctrl-a: all/none · enter: apply · unticked: removed and skipped from now on' \
-      --bind="load:select-all${bind}+first,ctrl-a:toggle-all" | sed 's/\x1b\[[0-9;]*m//g' | awk '{ print $2 }') || { info "Cancelled."; return 0; }
+      --bind="load:select-all${bind}+first,ctrl-a:toggle-all" "${gbinds[@]}" <<<"$table" >/dev/null
+    if [[ -e "$IP/chosen" ]]; then chosen=$(<"$IP/chosen"); asked=$(ip_get answer); rm -rf "$IP"
+    else rm -rf "$IP"; info "Cancelled."; return 0; fi
   else
     print_table <<<"$table" >&2
     chosen=$(printf '%s' "$rows" | awk -F"$S2" '$6 != "ignored" { print $2 }')
@@ -761,7 +834,7 @@ cmd_sync() {
   done <<<"${rows%$'\n'}"
   (( n_ign )) && info "${C_DIM}$n_ign new cluster(s) skipped from now on · kx ignore shows them${C_RESET}"
   if [[ -n "$drop" ]]; then
-    if confirm "Remove $(cut -f1 <<<"${drop%$'\n'}" | tr '\n' ' ')from $BASE_FILE (unticked)?" n; then
+    if [[ -n $asked ]] && [[ $asked == yes ]] || { [[ -z $asked ]] && confirm "Remove $(cut -f1 <<<"${drop%$'\n'}" | tr '\n' ' ')from $BASE_FILE (unticked)?" n; }; then
       backup_base
       while IFS=$'\t' read -r alias c label; do
         [[ -n "$alias" ]] || continue
@@ -936,7 +1009,8 @@ main() {
     __logs)          KX_TAB=1 pod_logs "$@" ;;
     __names)         ctx_names ;;
     __ctxrows)       ui_color; context_rows ;;
-    __pickdef)       ui_color; pick_default "$@" ;;
+    __gate)          ui_color; cmd_gate "$@" ;;
+    __syncgate)      ui_color; cmd_syncgate "$@" ;;
     __setdef)        set_default "$@" ;;
     __nsrows)        ui_color; ns_rows ;;
     __nsdef)         set_default_ns "$KX_NS_CTX" "$1" ;;

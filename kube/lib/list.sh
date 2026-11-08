@@ -58,16 +58,9 @@ list_footer() {   # text [toast]
   fzj "$(fz execute-silent "echo $id >$f")" "$(fz change-footer "$1")"
 }
 
-# fzf action with a text argument, wrapped in brackets the text doesn't contain.
-fz() {   # action text
-  local p
-  for p in '()' '[]' '{}' '<>' '~~' '!!' '@@' '##' '%%' '^^' '&&' '**' ';;' '//' '||'; do
-    [[ "$2" == *"${p:1:1}"* ]] && continue
-    printf '%s%s%s%s' "$1" "${p:0:1}" "$2" "${p:1:1}"; return
-  done
-}
-# Join actions with +.
-fzj() { local IFS=+; printf '%s' "$*"; }
+# fzf action with a text argument, and + joining actions (lib/ui.sh, lib/inplace.sh)
+fz() { ui_fz "$@"; }
+fzj() { ip_join "$@"; }
 
 list_cb_cmd() { printf '%q __list %q' "$SELF" "$S"; }   # how fzf calls back
 
@@ -105,15 +98,8 @@ list_hints() {
 list_max() { echo $(( $(ui_cols) * 45 / 100 - 8 )); }
 list_header() { ui_sort_keys "$(list_hints)" "" "$(list_max)"; }   # the column titles stay under it
 
-# A question in the header: amber, folded, then its keys.
-list_question_header() {   # question keys [warning-lines]
-  local q out=""
-  is_prod "$(current_ctx)" && out+="$(ui_badge PROD) ${C_RED}$(current_ctx)${C_RESET}"$'\n'
-  [[ -n "${3:-}" ]] && out+="$3"$'\n'
-  q=$(fold -s -w $(( $(ui_cols) - 12 )) <<<"$1" | sed "s/^/${C_YELLOW}${C_BOLD}/; s/\$/${C_RESET}/")
-  out+="$q"
-  ui_sort_keys "$2" "$out" "$(list_max)"   # the column titles stay under it; a resize wraps the keys again
-}
+# Questions are lib/inplace.sh's (ip_confirm / ip_ask / ip_reask); the list gives them
+# its storage (list_cb: ip_get / ip_set go to the vars file) and the PROD badge above them.
 
 # Back to the plain list: header, prompt, y/n keys, filter.
 list_restore() {   # [footer text] [toast]
@@ -129,21 +115,12 @@ list_restore() {   # [footer text] [toast]
 
 # Ask yes / no. pending is what runs on yes.
 list_confirm() {   # question pending [default y|n] [warning-lines]
-  local d="${3:-n}" keys
-  mode=confirm pending="$2"; list_save
-  if [[ "$d" == y ]]; then keys="y: yes (enter too) · n: no (esc too)"; else keys="y: yes · n: no (enter, esc too)"; fi
-  [[ "$d" == y ]] && pending="default-yes $pending" && list_save
-  fzj "$(fz change-header "$(list_question_header "$1" "$keys" "${4:-}")")" \
-      "$(fz change-prompt "${C_YELLOW}y / n? ${C_RESET}")" "rebind(y,n)" "$(list_footer " ")" \
-      "$(fz change-query "$saved_q")" enable-search
+  ip_confirm "$1" "$2" "${3:-n}" "${4:-}"
 }
 
 # Ask for typed text on the prompt line. pending gets the answer appended.
 list_ask() {   # question pending prefill prompt [warning-lines]
-  mode=ask pending="$2"; list_save
-  fzj "$(fz change-header "$(list_question_header "$1" "enter: ok · esc: cancel" "${5:-}")")" \
-      "$(fz change-prompt "${C_YELLOW}${4:-> }${C_RESET}")" disable-search "$(fz change-query "$3")" \
-      "$(list_footer " ")"
+  ip_ask "$1" "$2" "$3" "$4" "${5:-}"
 }
 
 # ------------------------------------------------------------------- rows ---
@@ -305,6 +282,12 @@ list_cb() {
   S="$1"; local ev="$2"; shift 2
   local kind ns selector of header pane act scale wkind pane_word all changes can_edit can_delete mode pending saved_q
   list_load
+  # lib/inplace.sh's questions keep mode / pending / saved_q in the vars file (so a background
+  # job's change waits for the list, see list_save); the rest are files in $S
+  ip_get() { case $1 in mode|pending|saved_q) printf '%s' "${!1}" ;; *) [[ -r $S/$1 ]] && cat "$S/$1" ;; esac; }
+  ip_set() { case $1 in mode|pending|saved_q) printf -v "$1" '%s' "$2"; list_save ;; *) printf '%s' "$2" >"$S/$1" ;; esac; }
+  ip_top() { if is_prod "$(current_ctx)"; then printf '%s' "$(ui_badge PROD) ${C_RED}$(current_ctx)${C_RESET}"; fi; }
+  IP_MAX=$(list_max)
   case "$ev" in
     rows) list_rows ;;
     key)  list_key "$@" ;;
@@ -327,10 +310,9 @@ list_key() {   # key ns name query
   local key="$1" rns="$2" name="$3" q="$4"
   case "$mode" in
     confirm)
-      case "$key" in
-        y) list_yes ;;
-        enter) if [[ "$pending" == default-yes* ]]; then list_yes; else list_restore "${C_DIM}Nothing done.${C_RESET}" toast; fi ;;
-        n|esc) list_restore "${C_DIM}Nothing done.${C_RESET}" toast ;;
+      case "$(ip_answer "$key")" in
+        yes) list_yes ;;
+        no) list_restore "${C_DIM}Nothing done.${C_RESET}" toast ;;
       esac
       return ;;
     ask)
@@ -386,8 +368,8 @@ list_key() {   # key ns name query
 
 # y on a yes/no question.
 list_yes() {
-  local p="${pending#default-yes }" w
-  read -r -a w <<<"$p"
+  local w
+  read -r -a w <<<"$pending"
   case "${w[0]}" in
     run)  mode=list; list_save; echo "print(@kx:run)+accept" ;;
     shell) list_shell "${w[1]}" "${w[2]}" ;;
@@ -474,8 +456,7 @@ list_shell() {   # ns pod
 
 # Ask the same typed question again, with what was wrong on top.
 list_reask() {   # message
-  local h; h=$(list_question_header "$(cat "$S/question" 2>/dev/null)" "enter: ok · esc: cancel" "${C_RED}✗ $1${C_RESET}")
-  fz change-header "$h"
+  ip_reask "$1"
 }
 
 # Confirm a change: y/n on dev, type the name on prod.
