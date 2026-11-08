@@ -805,11 +805,11 @@ install_blur_my_shell() { gx_install "$bm_uuid" "Blur my Shell" "$bm_path" "$bm_
 uninstall_blur_my_shell() { gx_uninstall "$bm_uuid" "Blur my Shell" "$bm_path"; }
 
 # ------------------------------------------------------ rounded-corners ---
-# Rounded Window Corners Reborn: 12 px corners, kept off for maximized and fullscreen windows.
+# Rounded Window Corners Reborn: 15 px corners, kept off for maximized and fullscreen windows.
 rc_uuid="rounded-window-corners@fxgn"; rc_path=/org/gnome/shell/extensions/rounded-window-corners-reborn/; rc_file="$repo/gnome/rounded-window-corners/settings.dconf"
 label_rounded_corners() { echo "Rounded corners"; }
 title_rounded_corners() { echo "Rounded corners on every window (GNOME extension; log out once)"; }
-detail_rounded_corners() { echo "GNOME extension $rc_uuid from extensions.gnome.org + preset look gnome/rounded-window-corners (12 px); the uninstall offers your earlier settings or the defaults"; }
+detail_rounded_corners() { echo "GNOME extension $rc_uuid from extensions.gnome.org + preset look gnome/rounded-window-corners (15 px); the uninstall offers your earlier settings or the defaults"; }
 state_rounded_corners() { gx_state "$rc_uuid" "$rc_path" "$rc_file"; }
 install_rounded_corners() { gx_install "$rc_uuid" "Rounded Window Corners" "$rc_path" "$rc_file"; }
 uninstall_rounded_corners() { gx_uninstall "$rc_uuid" "Rounded Window Corners" "$rc_path"; }
