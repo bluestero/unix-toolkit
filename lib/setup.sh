@@ -357,7 +357,7 @@ checklist() {
 
   if [[ -n "${GUM:-}" ]]; then
     _cl_gum "$title" && return 0
-    (( $? == 1 )) && return 1   # 2 = gum can't show this one; use the built-in list
+    return 1
   fi
 
   _cl_head() { [[ "${items[$1]}" == "## "* ]]; }
@@ -411,10 +411,11 @@ checklist() {
 }
 
 # _cl_gum: the same list in `gum choose`. Uses checklist's items/on/n.
-# 0 = picked, 1 = cancelled, 2 = can't (gum only pre-ticks all or nothing).
+# 0 = picked, 1 = cancelled. Pre-ticked rows are passed by their label (gum splits
+# --selected on commas, so a comma in a label is shown as ‚).
 # Rows under the first heading get a ★ (gum has no headings).
 _cl_gum() {
-  local title="$1" i name desc star="" first="" ticked=0 rows=0 out
+  local title="$1" i name desc star="" first="" label out
   local -a opts=() sel=()
   for (( i = 0; i < n; i++ )); do
     if [[ "${items[i]}" == "## "* ]]; then
@@ -423,18 +424,19 @@ _cl_gum() {
     fi
     name=${items[i]%%$'\t'*}; desc=""
     [[ "${items[i]}" == *$'\t'* ]] && desc=${items[i]#*$'\t'}
-    opts+=("$(printf '%s%-15s %s' "${star:+$star }" "$name" "$desc")"$'\x1f'"$i")
-    (( rows++ )); (( on[i] )) && (( ticked++ ))
+    label=$(printf '%s%-15s %s' "${star:+$star }" "$name" "$desc"); label=${label//,/‚}
+    opts+=("$label"$'\x1f'"$i")
+    (( on[i] )) && sel+=("$label")
   done
-  if (( ticked == rows )); then sel=(--selected='*')
-  elif (( ticked )); then return 2; fi
-  [[ -n "$first" ]] && title+="    ★ = $first"
+  local selarg=()
+  (( ${#sel[@]} )) && selarg=(--selected="$(IFS=,; printf '%s' "${sel[*]}")")
+  [[ -n "$first" ]] && title+="    ${D}★ = $first${R}"
   # gum's own key hints are too dim to read on some backgrounds and can't be
-  # restyled, so they're off and the header carries them instead.
-  title+=$'\n'"x  select    ↑ ↓  move    ctrl+a  all    enter  confirm    esc  cancel"
+  # restyled, so they're off and the header carries them, styled like the pickers' (ui_keys).
+  title="$B$title$R"$'\n'"$(ui_keys 'x: select · ↑↓: move · ctrl+a: all · enter: confirm · esc: cancel')"
   # gum's --height counts item rows only; the header lines come on top. Never taller than
   # the window (header + list + a spare line), or the header scrolls off the top.
-  local h=$(( rows + 3 )) term_rows head_lines room
+  local h=$(( ${#opts[@]} + 3 )) term_rows head_lines room
   term_rows=$(stty size </dev/tty 2>/dev/null | cut -d' ' -f1)
   head_lines=$(( $(grep -c '' <<<"$title") ))
   if [[ $term_rows =~ ^[0-9]+$ ]]; then
@@ -442,7 +444,9 @@ _cl_gum() {
     (( room < 3 )) && room=3
     (( h > room )) && h=$room
   fi
-  out=$(printf '%s\n' "${opts[@]}" | "$GUM" choose --no-limit --no-show-help "${sel[@]}" \
+  out=$(printf '%s\n' "${opts[@]}" | "$GUM" choose --no-limit --no-show-help "${selarg[@]}" \
+          --cursor="▶ " --cursor-prefix="[ ] " --unselected-prefix="[ ] " --selected-prefix="[✓] " \
+          --cursor.foreground=6 --selected.foreground=2 --header.foreground="" \
           --label-delimiter=$'\x1f' --header="$title" --height="$h" 2>/dev/tty) || return 1
   [[ -n "$out" ]] && mapfile -t CHECKLIST < <(sort -n <<<"$out")
   return 0
