@@ -10,16 +10,25 @@
 #   info     one line per component: id group tickable state badge label title detail note (\x1e between)
 #   on       the ticked ids     cur  the open tab (0 = first)
 #   dry/<id> its --dry-run lines (written in the background)
+#   cmds     "<set up again> TAB <undo>" (./install.sh, ./uninstall.sh, or fk install, ...)
+#   clashes  CLASHES (lib/components.sh) whose parts are both here: "id id|question"
+#   view     the open tab's rows, laid out; title its title row (the header's last line)
 #   go       made when enter on the summary applies
 # plus lib/inplace.sh's files (the overlap question asks in the list's header).
 
 # tabs_pick: shows wanted (all) with todo tickable; sets todo to the ticked ones.
-# 1 = cancelled. Needs install.sh's wanted, todo, ST/NT (state and note per id).
+# 1 = cancelled. Needs install.sh's wanted, todo, ST/NT (state and note per id), again, undo, layer.
 tabs_pick() {
   local T id g bg rc=0 on
   local -a picked=()
   T=$(mktemp -d) || return 1
   mkdir "$T/dry"; : >"$T/tabs"; : >"$T/about"; : >"$T/info"; : >"$T/on"; echo 0 >"$T/cur"
+  printf '%s\t%s\n' "$again" "$undo" >"$T/cmds"
+  local c a b
+  for c in "${CLASHES[@]}"; do
+    read -r a b <<<"${c%%|*}"
+    [[ " ${wanted[*]} " == *" $a "* && " ${wanted[*]} " == *" $b "* ]] && echo "$c"
+  done >"$T/clashes"
   for id in "${wanted[@]}"; do
     g=$(group_of "$id")
     grep -qxF "$g" "$T/tabs" || { echo "$g" >>"$T/tabs"; printf '%s\x1e%s\n' "$g" "${GROUP_ABOUT[$g]:-}" >>"$T/about"; }
@@ -39,8 +48,8 @@ tabs_pick() {
   local -a binds=()
   for k in right:1 tab:1 left:-1 btab:-1; do binds+=(--bind="${k%%:*}:transform:$cb go '$T' ${k#*:}"); done
   for k in y n esc; do binds+=(--bind="$k:transform:$cb key '$T' $k {2}"); done
-  bash "$repo/lib/tabs.sh" rows "$T" |
-    ui_fzf "work toolkit · set up" --no-input --header-lines=1 --delimiter=$'\t' --with-nth=1 \
+  bash "$repo/lib/tabs.sh" layout "$T"
+  ui_fzf "${layer:-work toolkit} · set up" --no-input --delimiter=$'\t' --with-nth=1 <"$T/view" \
       --footer=' ' --with-shell='bash -c' "${binds[@]}" \
       --bind="start:unbind(y,n)+transform:$cb header '$T'" \
       --bind="focus:transform:$cb foot '$T' {2}" \
@@ -63,9 +72,11 @@ t_info() {
   IFS=$'\x1e' read -r I_ID I_GROUP I_TICK I_STATE I_BADGE I_LABEL I_TITLE I_DETAIL I_NOTE <<<"$line"
 }
 t_on() { grep -qxF "$1" "$T/on"; }
-t_load() { mapfile -t TABS <"$T/tabs"; read -r CUR <"$T/cur"; NT=${#TABS[@]}; }   # summary = tab NT
+t_load() { mapfile -t TABS <"$T/tabs"; read -r CUR <"$T/cur"; NT=${#TABS[@]}; IFS=$'\t' read -r AGAIN UNDO <"$T/cmds"; }   # summary = tab NT
 
 # The open tab's rows, laid out: title row first, the id hidden after a TAB.
+# t_layout splits them: the title row goes in the header (a reload never leaves an old one).
+t_layout() { local v; v=$(t_rows); printf '%s\n' "${v%%$'\n'*}" >"$T/title"; tail -n +2 <<<"$v" >"$T/view"; }
 t_rows() {
   local mark n=0
   {
@@ -108,11 +119,12 @@ t_header() {
     about=$(grep -m1 "^${TABS[CUR]}"$'\x1e' "$T/about"); about=${about#*$'\x1e'}
     keys="←→: tab · space: tick · enter: to the summary · esc: cancel"
   else
-    about="What enter sets up. Each change still asks first (Enter = yes); ./uninstall.sh undoes any of it."
+    about="What enter sets up. Each change still asks first (Enter = yes); $UNDO undoes any of it."
     keys="←→: tab · enter: set these up · esc: cancel"
   fi
   [[ -n $about ]] && about=$(fold -s -w $(( ${FZF_COLUMNS:-$(ui_cols)} - 6 )) <<<"$about" | sed "s/^/$C_DIM/; s/\$/$C_RESET/")
   ui_sort_keys "$keys" "$(t_strip)${about:+$'\n'$about}"
+  printf '\n%s' "$(cut -f1 "$T/title")"
 }
 
 # The footer for the row under the cursor: on a tab, its whole line and what it touches
@@ -123,14 +135,14 @@ t_foot() {
   if (( CUR < NT )); then
     out="$I_TITLE"$'\n'"touches: $I_DETAIL"
     [[ -n $I_NOTE ]] && out+=$'\n'"$I_NOTE"
-    (( I_TICK )) || [[ $I_STATE != installed ]] || out+=$'\n'"already set up: ./uninstall.sh $I_ID removes it"
+    (( I_TICK )) || [[ $I_STATE != installed ]] || out+=$'\n'"already set up: $UNDO $I_ID removes it"
     fold -s -w "$w" <<<"$out"
   elif [[ -e $T/dry/$1 ]]; then
     if [[ -s $T/dry/$1 ]]; then cat "$T/dry/$1"; else echo "nothing to ask: it is set up as it is"; fi
   else echo "working out what it would do…"; fi
 }
 
-t_reload() { ip_join "reload-sync($cb rows '$T')" "$(ui_fz change-header "$(t_header)")" "${1:-first}"; }
+t_reload() { t_layout; ip_join "reload-sync(cat '$T/view')" "$(ui_fz change-header "$(t_header)")" "${1:-first}"; }
 
 # go <step>: another tab (0 = the same one again, laid out for a resized window)
 t_go() {
@@ -147,14 +159,19 @@ t_tick() {
   t_reload "pos($(( $2 + 1 )))"
 }
 
-# Both bars would be there afterwards (ticked, or in place already), one of them ticked.
-t_overlap() {
-  local id there=0 ticked=0
-  for id in dash2dock dash-to-panel; do
-    t_info "$id" || return 1
-    if t_on "$id"; then (( there++, ticked++ )); elif [[ $I_STATE == installed || $I_STATE == partial ]]; then (( there++ )); fi
-  done
-  (( there == 2 && ticked ))
+# The first clash whose two parts would both be there afterwards (ticked, or in place
+# already), one of them ticked: sets CLASH_ID (the first part) and CLASH_Q (the question).
+t_clash() {
+  local line id there ticked
+  while IFS= read -r line; do
+    there=0 ticked=0
+    for id in ${line%%|*}; do
+      t_info "$id" || continue
+      if t_on "$id"; then (( there++, ticked++ )); elif [[ $I_STATE == installed || $I_STATE == partial ]]; then (( there++ )); fi
+    done
+    (( there == 2 && ticked )) && { CLASH_ID=${line%% *} CLASH_Q=${line#*|}; return 0; }
+  done <"$T/clashes"
+  return 1
 }
 
 # key <key> <id>: enter, y, n, esc. In a question they answer it.
@@ -163,11 +180,12 @@ t_key() {
   if [[ $(ip_get mode) == confirm ]]; then
     a=$(ip_answer "$1"); [[ -n $a ]] || return 0
     if [[ $a == yes ]]; then touch "$T/go"; echo accept; return; fi
-    # no: back to the tab with the dock, on its row
-    t_info dash2dock
+    # no: back to the tab with the clash's first part, on its row
+    local first; first=$(ip_get pending); first=${first#clash:}
+    t_info "$first"
     for (( CUR = 0; CUR < NT; CUR++ )); do [[ ${TABS[CUR]} == "$I_GROUP" ]] && break; done
     echo "$CUR" >"$T/cur"
-    while IFS=$'\x1e' read -r id g _; do [[ $g == "$I_GROUP" ]] || continue; (( i++ )); [[ $id == dash2dock ]] && break; done <"$T/info"
+    while IFS=$'\x1e' read -r id g _; do [[ $g == "$I_GROUP" ]] || continue; (( i++ )); [[ $id == "$first" ]] && break; done <"$T/info"
     ip_join "$(ip_back)" "$(t_reload "pos($i)")"
     return
   fi
@@ -175,8 +193,8 @@ t_key() {
     esc) echo abort ;;
     enter)
       if (( CUR < NT )); then t_go $(( NT - CUR )); return; fi
-      if t_overlap; then
-        ip_confirm "Both bars use the same space. Keep both?" overlap n "$(t_strip)"; return
+      if t_clash; then
+        ip_confirm "$CLASH_Q" "clash:$CLASH_ID" n "$(t_strip)"; return
       fi
       touch "$T/go"; echo accept ;;
   esac
@@ -189,7 +207,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   . "$repo/lib/inplace.sh"
   t_load
   case $1 in
-    rows)   t_rows ;;
+    layout) t_layout ;;
     header) ui_fz change-header "$(t_header)" ;;
     foot)   ui_fz change-footer "$(t_foot "${3:-}")" ;;
     go)     t_go "$3" ;;

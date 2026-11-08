@@ -6,7 +6,7 @@
 set -uo pipefail
 
 repo="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-mode=ask details=0 list=0 help=0
+mode=ask details=0 list=0 help=0 layer=""
 wanted=()
 for arg in "$@"; do
   case "$arg" in
@@ -15,6 +15,7 @@ for arg in "$@"; do
     -n|--dry-run)   mode=dry ;;
     -y|--yes)       mode=yes ;;
     -p|--plain)     export WORK_TOOLKIT_PLAIN=1 ;;
+    --layer=*)      layer=${arg#--layer=} ;;
     -*) printf '✗ unknown option %s · see: ./uninstall.sh help\n' "$arg" >&2; exit 2 ;;
     *)  wanted+=("$arg") ;;
   esac
@@ -35,6 +36,7 @@ if (( help )); then
 --dry-run	show what would be removed; changes nothing
 --yes	no questions (components must be named)
 --plain	don't use gum even if it's installed
+--layer=<name>	only that layer's parts (fk uninstall uses it)
 
 You get your own setup back: replaced files, the lines taken out of ~/.bashrc,
 your default terminal, Ctrl+Alt+T and login shell. Repo files are never deleted.
@@ -44,13 +46,23 @@ EOF
 fi
 use_gum
 
+# What this run may touch: one layer's parts (--layer), else everything but standalone layers' (fk uninstall)
+if [[ -n $layer ]]; then
+  layer_path "$repo" "$layer" >/dev/null || { printf '✗ no layer %s · see: tk layer ls\n' "'$layer'" >&2; exit 2; }
+  mapfile -t allowed < <(layer_parts "$layer")
+else mapfile -t allowed < <(main_parts); fi
+again=./install.sh
+[[ -n $layer && -n ${STANDALONE[$layer]:-} ]] && again="${STANDALONE[$layer]} install"
 for w in "${wanted[@]}"; do
-  [[ " ${COMPONENTS[*]} " == *" $w "* ]] || { printf '✗ unknown command or component %s · see: ./install.sh ls\n' "'$w'" >&2; exit 2; }
+  [[ " ${allowed[*]} " == *" $w "* ]] && continue
+  if [[ " ${COMPONENTS[*]} " == *" $w "* ]]; then printf '✗ %s is removed with: %s %s\n' "'$w'" "$(setup_cmd "$w" | sed 's/ install$/ uninstall/; s/install.sh$/uninstall.sh/')" "$w" >&2
+  else printf '✗ unknown command or component %s · see: ./install.sh ls\n' "'$w'" >&2; fi
+  exit 2
 done
 
 # Only what's actually there can be removed.
 present=() labels=()
-for id in "${COMPONENTS[@]}"; do
+for id in "${allowed[@]}"; do
   component_state "$id"
   [[ "$STATE" == installed || "$STATE" == partial ]] || continue
   present+=("$id")
@@ -59,7 +71,7 @@ done
 
 say ""
 if (( ${#present[@]} == 0 )); then
-  say "Nothing from the toolkit is installed. Nothing to do."
+  say "Nothing ${layer:+of $layer }is installed. Nothing to do."
   exit 0
 fi
 
@@ -105,7 +117,7 @@ summary=""
 for id in "${order[@]}"; do
   "$(fn state "$id")"
   if [[ "$STATE" == installed || "$STATE" == partial ]]; then summary+="${Y}◐${R} $("$(fn label "$id")")"$'\x1f'"${D}still partly there · see the log${R}"$'\n'
-  else summary+="${G}✓${R} $("$(fn label "$id")")"$'\x1f'"${D}removed · ./install.sh $id puts it back${R}"$'\n'; fi
+  else summary+="${G}✓${R} $("$(fn label "$id")")"$'\x1f'"${D}removed · $again $id puts it back${R}"$'\n'; fi
 done
 printf '%s' "$summary" | print_table 3 | sed 's/\x1b\[[0-9;]*m//g' >>"$log_file"
 if [[ -t 1 ]]; then

@@ -1,6 +1,6 @@
-"""./install.sh's tab view, in a scratch copy of the repo (feelkit included, for the two
-bars) with a scratch HOME and a fake GNOME. Nothing is set up: each test stops at the
-first question of the run, or before."""
+"""./install.sh's tab view, in a scratch copy of the repo (feelkit included: a standalone
+layer, so only fk install / --layer=feelkit shows it) with a scratch HOME and a fake GNOME.
+Nothing is set up: each test stops at the first question of the run, or before."""
 import os
 import re
 import shutil
@@ -65,8 +65,27 @@ def test_tick_follows_to_the_summary(sb):
     t.wait_exit()
 
 
+def run(sb, repo, *args):
+    p = subprocess.run([repo + "/" + args[0], *args[1:]], env=sb.env, cwd=sb.home, capture_output=True,
+                       text=True, stdin=subprocess.DEVNULL, timeout=60)
+    return p.returncode, p.stdout + p.stderr
+
+
+def test_feelkit_stays_out_of_the_main_install(sb):
+    repo = copy(sb)
+    _, out = run(sb, repo, "install.sh", "ls")
+    assert "kitty-bg" not in out and "dash2dock" not in out and "kitty-config" in out, out
+    code, out = run(sb, repo, "install.sh", "kitty-bg")
+    assert code == 2 and "fk install kitty-bg" in out, out
+    code, out = run(sb, repo, "uninstall.sh", "kitty-bg")
+    assert code == 2 and "fk uninstall kitty-bg" in out, out
+    _, out = run(sb, repo, "install.sh", "--layer=feelkit", "ls")
+    rows = set(re.findall(r"^  (\S+) ", out, re.M))
+    assert "kitty-bg" in rows and "kitty-config" not in rows, out
+
+
 def test_both_bars_ask_and_no_goes_back(sb):
-    _, t = start(sb)
+    _, t = start(sb, "--layer=feelkit")
     t.key("enter")
     t.wait_for("SETS UP")
     t.key("enter")
@@ -80,19 +99,21 @@ def test_both_bars_ask_and_no_goes_back(sb):
     assert not os.path.exists(sb.path("~/.bashrc"))
 
 
+def test_both_bars_yes_sets_up(sb):
+    _, t = start(sb, "--plain", "--layer=feelkit")
+    t.key("enter")
+    t.wait_for("SETS UP")
+    t.key("enter")
+    t.wait_for("Keep both?")
+    t.key("y")
+    t.wait_for("[y/N, default: no]")                      # the run has started: its first question
+    t.close()
+
+
 def test_enter_on_the_summary_sets_up_the_ticked(sb):
     _, t = start(sb, "--plain")
-    for _ in range(3):                                    # to Desktop (GNOME)
-        t.key("right")
-    t.wait_for("dash-to-panel")
-    t.key(*["down"] * 6)
-    t.wait(lambda t: "dash-to-panel" in t.cursor_line(), what="the cursor on dash-to-panel")
-    t.key("space")                                        # unticked: no question about both bars
-    t.wait(lambda t: "[ ]   dash-to-panel" in t.text(), what="dash-to-panel unticked")
     t.key("enter")
-    t.wait_for("✓ dash2dock ")
-    t.settle()
-    assert "dash-to-panel" not in t.text(), "dash-to-panel was unticked"
+    t.wait_for("✓ bash ")
     t.key("enter")
     t.wait_for("[Y/n, default: yes]")                     # the run has started: its first question
     t.close()

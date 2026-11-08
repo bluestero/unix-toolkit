@@ -111,9 +111,13 @@ Copying a folder into `layers/` works too (no updates then). Everything in a lay
 | `claude/skills/<skill>/` | Claude Code skills, linked by the `claude-skill` component |
 | `claude/guidelines/` | Vendored coding guidelines, merged into `CLAUDE.md` by the `claude-guidelines` component |
 
+| `standalone` | the layer is set up on its own: the file holds its command (feelkit's says `fk`), so `fk install` / `fk uninstall` set up and remove its parts, and `tk install`, `tk uninstall` and `./install.sh ls` leave them out; `tk status` and `tk doctor` give it one line ("6 of 11 parts set up → fk install") |
+
 `lib/layers.sh` has the same list for whoever writes one. A layer's components can also say what
 they need from the machine (`requires_<id>`: `gnome`, `apt`, `linux`) and list themselves in
-`LOOK_PARTS+=(…)` to get the keep / re-apply / reset settings menu.
+`LOOK_PARTS+=(…)` to get the keep / re-apply / reset settings menu, start unticked
+(`off_<id>`, a function: unticked when it succeeds), or name two parts that shouldn't both be in
+(`CLASHES+=("id id|the question")`: the installer's summary asks once, default No).
 
 ### Layers that come with it
 
@@ -121,11 +125,14 @@ they need from the machine (`requires_<id>`: `gnome`, `apt`, `linux`) and list t
 the kitty background, theme, accents and icons (`k-bg`, `k-theme`, `k-icon`), where new windows
 open, and the GNOME presets (Dash to Panel, Dash2Dock, Vitals, Blur my Shell, rounded corners, no
 animations). The toolkit works without it: rofi and btop just keep their default colours.
+It's optional and set up on its own: `tk install` never shows its parts.
 
 It lives in its own repo, [unix-feelkit](https://github.com/bluestero/unix-feelkit):
 
 ```bash
 tk layer add https://github.com/bluestero/unix-feelkit.git   # clones into layers/feelkit, offers to set it up
+fk install                                                   # its own installer: Kitty looks, GNOME looks, Summary
+fk uninstall                                                 # removes its parts, your own settings put back
 ```
 
 ## Install / uninstall
@@ -140,15 +147,15 @@ tk layer add https://github.com/bluestero/unix-feelkit.git   # clones into layer
 ```
 
 The installer opens on a tab per group (Recommended, Kitty, Optional, Desktop, Cloud, Workspaces,
-Claude Code, then each layer's own). A tab says in one line what the group is, then lists its parts
+Claude Code, then each layer's own; a standalone layer such as feelkit has its own: `fk install`). A tab says in one line what the group is, then lists its parts
 with their state (installed, partly, not installed, not supported here) and what each gets you; the
 footer shows what the part under the cursor touches on disk. ←/→ or Tab change tabs, Space ticks,
 Enter goes to the **Summary** tab: everything that will be set up, with what `--dry-run` prints for the
-part under the cursor. Enter there sets it up; Esc anywhere leaves with nothing changed. With both
-bars ticked (Dash2Dock and Dash to Panel, or one ticked and the other already in), the summary asks
-once whether to keep both (No goes back to the Desktop tab). Needs fzf 0.63+ (`./install.sh fzf`);
+part under the cursor. Enter there sets it up; Esc anywhere leaves with nothing changed. Parts that
+shouldn't both be in (feelkit's Dash2Dock and Dash to Panel: `fk install`), one ticked and the other
+ticked or already in, make the summary ask once whether to keep both (No goes back to their tab). Needs fzf 0.63+ (`./install.sh fzf`);
 with an older fzf it's one checklist instead. Missing parts are ticked except `yazi-keys` (an extra)
-and Dash2Dock when Dash to Panel is in.
+and, in `fk install`, Dash2Dock when Dash to Panel is in.
 If [gum](https://github.com/charmbracelet/gum) isn't installed, the installer offers to fetch it
 (v2.0.2, checksum-checked, into `~/.local/bin`, no sudo) for nicer questions (and the checklist); say no
 and the plain built-in ones are used. Remove it with `rm ~/.local/bin/gum`.
@@ -173,6 +180,10 @@ The first time the installer changes something of yours, it keeps what you had i
 | login shell | the one you had before (else bash) |
 | Claude Code `settings.json` | only the toolkit's hook entry is removed |
 
+feelkit's parts below (`kitty-bg`, `kitty-theme`, `kitty-accents`, `kitty-icons`, `kitty-centered` and the
+GNOME looks: `dash2dock`, `dash-to-panel`, `no-animations`, `vitals`, `vitals-icons`, `blur-my-shell`,
+`rounded-corners`) are set up with `fk install <part>`, the rest with `./install.sh <part>`.
+
 | Component | What it sets up |
 |---|---|
 | `bash` | `~/.bashrc` keeps the Ubuntu defaults plus one line loading `shell/init.sh`; PATH, nvm, direnv/starship hooks and exact copies of the toolkit's aliases move into the repo, clashing leftovers (ble.sh, old okcli hooks, duplicate nvm) are removed. Your own aliases stay. Uninstall puts the removed lines back |
@@ -196,11 +207,11 @@ The first time the installer changes something of yours, it keeps what you had i
 | `kitty-centered` | GNOME setting `org.gnome.mutter center-new-windows`, so new windows (kitty included) open in the middle of the screen; the old value is put back on uninstall |
 | `window-calls` | GNOME extension Window Calls (from extensions.gnome.org) so `ws` can close and focus editor windows; log out once after installing |
 | `alt-tab-desktop` | GNOME extension in `gnome/`: after Super+D (show desktop), Alt+Tab returns to the window you minimized instead of the one before it; log out once after installing |
-| `dash-to-panel` | Dash to Panel (GNOME extension) from extensions.gnome.org: the dock and the top bar merged into one bar (app icons with window previews on the left; clock, Vitals and system menu on the right; no Activities button). Preset look from `feelkit/gnome/dash-to-panel/` (bottom, 35 px, dark, own apps-button icon). Your choice: on its own or together with `dash2dock`; asked separately, default No; `./install.sh dash-to-panel` on an installed one opens the same settings menu as `vitals`; the uninstall asks whether to put your old settings back or go to the app's defaults; log out once after installing |
+| `dash-to-panel` | Dash to Panel (GNOME extension) from extensions.gnome.org: the dock and the top bar merged into one bar (app icons with window previews on the left; clock, Vitals and system menu on the right; no Activities button). Preset look from `feelkit/gnome/dash-to-panel/` (bottom, 35 px, dark, own apps-button icon). Your choice: on its own or together with `dash2dock`; asked separately, default No; `fk install dash-to-panel` on an installed one opens the same settings menu as `vitals`; the uninstall asks whether to put your old settings back or go to the app's defaults; log out once after installing |
 | `dash2dock` | Dash2Dock Animated (macOS-style GNOME dock at the bottom) from extensions.gnome.org, with the toolkit's patches in `feelkit/gnome/dash2dock/`: a click on an app with several windows shows window previews, calm drag-to-reorder, no gap above the dock; plus a preset look. Replaces Ubuntu's dock; your choice, alone or together with Dash to Panel; asked separately, default No; the uninstall puts that back; log out once after installing |
 | `hide-docker-tray` | Small GNOME extension (`gnome/hide-docker-tray@work-toolkit`, linked in) that hides Docker Desktop's tray item: no icon, empty menu, three dots that do nothing on click; log out once after installing |
 | `app-keys` | Super+1..9 for the Nth pinned dock app: launches it, brings it to the front, or minimizes it when it is already in front (`bin/k-appkey`, one short process per key press, no background process; uses Window Calls). Only windows on the current desktop count: with none there, it launches a new one. Turns GNOME's own Super+number off; the uninstall puts it back; asked with default No |
-| `vitals` | Vitals (GNOME extension) from extensions.gnome.org: CPU, memory and temperature in the top bar. Asks whether to use the toolkit's look (`feelkit/gnome/vitals/`: which sensors show, fixed widths). Your earlier settings are kept once; the uninstall asks whether to put them back or go to the app's defaults. `./install.sh vitals` on an installed one opens a menu: keep your settings, re-apply the look, reset to the app's defaults, or undo the last change (the settings from just before it are kept once); log out once after installing |
+| `vitals` | Vitals (GNOME extension) from extensions.gnome.org: CPU, memory and temperature in the top bar. Asks whether to use the toolkit's look (`feelkit/gnome/vitals/`: which sensors show, fixed widths). Your earlier settings are kept once; the uninstall asks whether to put them back or go to the app's defaults. `fk install vitals` on an installed one opens a menu: keep your settings, re-apply the look, reset to the app's defaults, or undo the last change (the settings from just before it are kept once); log out once after installing |
 | `blur-my-shell` | Blur my Shell (GNOME extension) from extensions.gnome.org with an optional look from `feelkit/gnome/blur-my-shell/` (blurred overview in Liquid Glass and Alt+Tab, applications untouched). Same settings menu as `vitals`; log out once after installing |
 | `rounded-corners` | Rounded Window Corners Reborn (GNOME extension) from extensions.gnome.org with an optional look from `feelkit/gnome/rounded-window-corners/` (15 px, off for maximized and fullscreen windows). Same settings menu as `vitals`; log out once after installing |
 | `vitals-icons` | Two SVGs in `feelkit/gnome/vitals-icons` (CPU chip with a solid core, RAM chip with pins) copied over the Vitals extension's `icons/original` icons, and its dropdown is centred under the pill (`menu-centered`, old value put back on uninstall); stock ones kept as `*.toolkit-orig` for the uninstall. An extension update restores the stock icons, so run it again after one |

@@ -73,7 +73,9 @@ cmd_pick() {
 }
 
 # ---------------------------------------------------------------- status ---
-# Which installer components are in place: "installed total partial-names"
+# Which installer components are in place. First line, the toolkit's (./install.sh):
+# "installed total not-yet-names"; then one per standalone layer (fk install):
+# "<layer> <command> installed total"
 toolkit_state() {
   (
     repo=$ROOT mode=dry details=0
@@ -81,27 +83,42 @@ toolkit_state() {
     . "$ROOT/lib/setup.sh" >/dev/null 2>&1
     # shellcheck source=../lib/components.sh
     . "$ROOT/lib/components.sh" >/dev/null 2>&1
-    local id n=0 total=0 left=""
-    for id in "${COMPONENTS[@]}"; do
-      "$(fn state "$id")" >/dev/null 2>&1
-      [[ "$STATE" == n/a ]] && continue
-      total=$((total + 1))
-      if [[ "$STATE" == installed ]]; then n=$((n + 1)); else left+="$id "; fi
-    done
-    printf '%s %s %s\n' "$n" "$total" "$left"
+    local id n=0 total=0 left="" l
+    count() {
+      n=0 total=0 left=""
+      for id in "$@"; do
+        "$(fn state "$id")" >/dev/null 2>&1
+        [[ "$STATE" == n/a ]] && continue
+        total=$((total + 1))
+        if [[ "$STATE" == installed ]]; then n=$((n + 1)); else left+="$id "; fi
+      done
+    }
+    count $(main_parts); printf '%s %s %s\n' "$n" "$total" "$left"
+    for l in "${!STANDALONE[@]}"; do count $(layer_parts "$l"); printf '%s %s %s %s\n' "$l" "${STANDALONE[$l]}" "$n" "$total"; done
   )
+}
+# "feelkit  6 of 11 set up → fk install" for each standalone layer, from toolkit_state's lines
+layer_lines() {
+  local l c n total
+  while read -r l c n total; do
+    [[ -n $l ]] || continue
+    if (( n == total )); then printf '%s\t%s\n' "$l" "${C_GREEN}all $total parts set up${C_RESET}"
+    else printf '%s\t%s\n' "$l" "$n of $total parts set up  $(ui_hint "$c install")"; fi
+  done
 }
 
 cmd_status() {
   "$ROOT/bin/ctx"
   [[ -t 1 ]] || ui_no_color
-  local n total left setup update
-  read -r n total left < <(toolkit_state)
+  local n total left setup update state layers
+  state=$(toolkit_state)
+  read -r n total left <<<"${state%%$'\n'*}"
+  layers=$(tail -n +2 <<<"$state" | layer_lines)
   if [[ -z "$left" ]]; then setup="${C_GREEN}all $total parts set up${C_RESET}"
   else setup="${C_YELLOW}$n of $total parts set up${C_RESET}  $(ui_hint "tk install ${left% }")"; fi
   if git -C "$ROOT" rev-parse >/dev/null 2>&1; then update="$(version) ${C_DIM}($(git_rev))${C_RESET}  $(ui_hint 'tk update')"
   else update="${C_DIM}not a git repo, so no updates${C_RESET}"; fi
-  printf 'folder\t%s\nset up\t%s\nversion\t%s\n' "${ROOT/#$HOME/\~}" "$setup" "$update" | ui_fields "tk · toolkit"
+  printf 'folder\t%s\nset up\t%s\n%sversion\t%s\n' "${ROOT/#$HOME/\~}" "$setup" "${layers:+$layers$'\n'}" "$update" | ui_fields "tk · toolkit"
 }
 
 # ---------------------------------------------------------------- doctor ---
@@ -143,9 +160,16 @@ cmd_doctor() {
   if [[ -n "${KX_SHELL:-}" && -n "${OKCLI_SHELL:-}" ]]; then check tk ok "shell hooks"
   else check tk bad "shell hooks aren't loaded" "tk install bash"; fi
   command -v fzf >/dev/null && check tk ok fzf || check tk bad "fzf isn't installed (the pickers need it)"
-  read -r n total left < <(toolkit_state)
+  local state l c
+  state=$(toolkit_state)
+  read -r n total left <<<"${state%%$'\n'*}"
   if [[ -z "$left" ]]; then check tk ok parts
   else check tk bad "$n of $total installer parts set up" "tk install ${left% }"; fi
+  # a standalone layer (feelkit): its own line, with its command when parts are left
+  while read -r l c n total; do
+    [[ -n $l ]] || continue
+    if (( n == total )); then check "$l" ok parts; else check "$l" bad "$n of $total parts set up" "$c install"; fi
+  done < <(tail -n +2 <<<"$state")
 
   for tool in "${ORDER[@]}"; do
     if [[ -z "${PROBLEMS[$tool]:-}" ]]; then
@@ -204,7 +228,9 @@ cmd_update() {
   [[ "$new" != "$old" ]] && ok "tk $old → ${C_BOLD}$new${C_RESET}"
   while IFS= read -r d; do
     own_repo "$d" || continue
-    pull_one "$d" "layer $(basename "$d")" && changed=1
+    if [[ -f $d/standalone ]]; then   # set up on its own: say how, don't run it
+      pull_one "$d" "layer $(basename "$d")" && info "${C_DIM}New in $(basename "$d")? $(head -1 "$d/standalone") install sets it up${C_RESET}"
+    else pull_one "$d" "layer $(basename "$d")" && changed=1; fi
   done < <(layer_dirs "$ROOT")
   (( changed )) || return 0
   info "${C_DIM}Checking for new parts to set up…${C_RESET}"
@@ -239,8 +265,10 @@ layer_add() {
   git clone -q "$url" "$dir" || die "couldn't clone $url (no access? check: ssh -T git@github.com)"
   ok "layer $name added: ${dir/#$HOME/\~}"
   info "${C_DIM}Its commands and settings load in new terminals.${C_RESET}"
+  local later="tk install --layer=$name"
+  [[ -f $dir/standalone ]] && later="$(head -1 "$dir/standalone") install"   # set up on its own (fk install)
   confirm "Set up its parts now?" y && exec "$ROOT/install.sh" --layer="$name"
-  info "Later: tk install --layer=$name"
+  info "Later: $later"
 }
 
 layer_rm() {

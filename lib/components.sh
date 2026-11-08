@@ -444,6 +444,7 @@ uninstall_yazi() {
 yk_src="$repo/yazi/keymap.toml"
 yk_file="$HOME/.config/yazi/keymap.toml"
 label_yazi_keys() { echo "yazi keys"; }
+off_yazi_keys() { :; }   # an extra: unticked until you choose it
 title_yazi_keys() { echo "yazi: > picks a folder inside this one; ctrl+backspace deletes a word"; }
 detail_yazi_keys() { echo "a marked block from yazi/keymap.toml in ~/.config/yazi/keymap.toml (the file is made if it's missing); needs fzf"; }
 # yazi's keymap can't have both prepend_keymap = [...] and [[...prepend_keymap]] for one layer:
@@ -1336,13 +1337,18 @@ uninstall_claude_guidelines() { cg_present || { ok "not there"; return 0; }; cg_
 # Each layer's own components (lib/layers.sh), after the toolkit's.
 # shellcheck source=layers.sh
 . "$repo/lib/layers.sh"
-# layer_parts <name>: the components that layer adds, plus claude-skill when it brings skills
-declare -gA LAYER_OF=()
+# Parts that shouldn't both be in: "id id|the question" (a layer adds its own; the installer's
+# summary asks it once, default No).
+CLASHES=()
+# A standalone layer (a file "standalone" holding its own command, e.g. fk) is set up on its
+# own: <command> install / uninstall. ./install.sh and ./uninstall.sh leave its parts out.
+declare -gA LAYER_OF=() STANDALONE=()
 while IFS= read -r _layer; do
   _n=${#COMPONENTS[@]}
   # shellcheck disable=SC1090
   [[ -r $_layer/components.sh ]] && . "$_layer/components.sh"
   for _id in "${COMPONENTS[@]:_n}"; do LAYER_OF[$_id]=${_layer##*/}; done
+  [[ -f $_layer/standalone ]] && STANDALONE[${_layer##*/}]=$(head -1 "$_layer/standalone")
 done < <(layer_dirs "$repo")
 unset _layer _n _id
 # A layer's components land at the end of COMPONENTS; bring each group together again, groups
@@ -1359,9 +1365,19 @@ _regroup() {
   COMPONENTS=("${out[@]}")
 }
 _regroup; unset -f _regroup
+# layer_parts <name>: the components that layer adds, plus claude-skill when it brings skills
 layer_parts() {
   local id
   for id in "${COMPONENTS[@]}"; do [[ ${LAYER_OF[$id]:-} == "$1" ]] && echo "$id"; done
   local d; d=$(layer_path "$repo" "$1") && compgen -G "$d/claude/skills/*/" >/dev/null && echo claude-skill
   return 0
 }
+# main_parts: what plain ./install.sh and ./uninstall.sh offer (no standalone layer's parts)
+main_parts() {
+  local id l
+  for id in "${COMPONENTS[@]}"; do l=${LAYER_OF[$id]:-}; [[ -n $l && -n ${STANDALONE[$l]:-} ]] || echo "$id"; done
+}
+# setup_cmd <id>: how to set it up again: "./install.sh", or its standalone layer's "fk install"
+setup_cmd() { local l=${LAYER_OF[$1]:-}; if [[ -n $l && -n ${STANDALONE[$l]:-} ]]; then echo "${STANDALONE[$l]} install"; else echo ./install.sh; fi; }
+# starts unticked in the installer when off_<id> says so
+on_by_default() { ! { declare -F "$(fn off "$1")" >/dev/null && "$(fn off "$1")"; }; }

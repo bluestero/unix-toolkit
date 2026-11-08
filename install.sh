@@ -40,7 +40,7 @@ if (( help )); then
 --details	also show diffs (e.g. ~/.bashrc) before asking
 --yes	no questions, for scripted setups
 --plain	don't use or offer gum (the nicer-looking lists)
---layer=<name>	only that layer's parts (tk layer add uses it)
+--layer=<name>	only that layer's parts (tk layer add and fk install use it)
 
 ./install.sh ls names every component; ./uninstall.sh undoes any of them.
 Log: ~/.local/state/work-toolkit/setup.log
@@ -48,17 +48,23 @@ EOF
   exit 0
 fi
 
-for w in "${wanted[@]}"; do
-  [[ " ${COMPONENTS[*]} " == *" $w "* ]] || { printf '✗ unknown command or component %s · see: ./install.sh ls\n' "'$w'" >&2; exit 2; }
-done
-named=${#wanted[@]}
+# What this run may touch: one layer's parts (--layer), else everything but standalone layers' (fk install)
 if [[ -n $layer ]]; then
   layer_path "$repo" "$layer" >/dev/null || { printf '✗ no layer %s · see: tk layer ls\n' "'$layer'" >&2; exit 2; }
-  (( named )) || mapfile -t wanted < <(layer_parts "$layer")
-  (( ${#wanted[@]} )) || { echo "The $layer layer has nothing to set up."; exit 0; }
-else
-  (( named )) || wanted=("${COMPONENTS[@]}")
-fi
+  mapfile -t allowed < <(layer_parts "$layer")
+else mapfile -t allowed < <(main_parts); fi
+for w in "${wanted[@]}"; do
+  [[ " ${allowed[*]} " == *" $w "* ]] && continue
+  if [[ " ${COMPONENTS[*]} " == *" $w "* ]]; then printf '✗ %s is set up with: %s %s\n' "'$w'" "$(setup_cmd "$w")" "$w" >&2
+  else printf '✗ unknown command or component %s · see: ./install.sh ls\n' "'$w'" >&2; fi
+  exit 2
+done
+named=${#wanted[@]}
+(( named )) || wanted=("${allowed[@]}")
+[[ -n $layer ]] && (( ! ${#wanted[@]} )) && { echo "The $layer layer has nothing to set up."; exit 0; }
+# how to set a part up again, and undo it: ./install.sh, or a standalone layer's own command
+again=./install.sh undo=./uninstall.sh
+[[ -n $layer && -n ${STANDALONE[$layer]:-} ]] && again="${STANDALONE[$layer]} install" undo="${STANDALONE[$layer]} uninstall"
 
 if [[ "$mode" == ask && $list == 0 && ! -t 0 ]]; then
   echo "This installer asks before each change, but there's no terminal to ask in."
@@ -75,10 +81,6 @@ badge() {
     *)         printf '%s– n/a%s' "$D" "$R" ;;
   esac
 }
-
-# Dash2Dock and Dash to Panel both replace Ubuntu's dock: with the panel in, leave the dock unticked.
-# yazi-keys is an extra: unticked until you choose it.
-on_by_default() { [[ $1 != yazi-keys ]] && ! { [[ $1 == dash2dock ]] && d2d_other_bar; }; }
 
 logf ""; logf "=== install $ts ($mode) ${wanted[*]}"
 # Overview: every component and its state, grouped, in one box.
@@ -158,7 +160,7 @@ fi
 # --yes / --dry-run skip the list.
 if [[ "$mode" == ask && $named == 0 ]] && (( ! tabs )); then
   say "Everything below is ticked, so ${B}Enter${R} sets it all up. Untick anything you don't want."
-  say "${D}Each change still asks first (Enter = yes), and ./uninstall.sh undoes any of it.${R}"
+  say "${D}Each change still asks first (Enter = yes), and $undo undoes any of it.${R}"
   say ""
   labels=() ids=() on="" prev=""
   for id in "${todo[@]}"; do
@@ -194,15 +196,15 @@ for id in "${todo[@]}"; do
   component_state "$id"
   case "$STATE" in
     installed) mark="${G}✓${R}" what="ready" ;;
-    partial)   mark="${Y}◐${R}" what="partly done · ./install.sh $id finishes it" ;;
-    *)         mark="${D}○${R}" what="skipped · ./install.sh $id any time" ;;
+    partial)   mark="${Y}◐${R}" what="partly done · $again $id finishes it" ;;
+    *)         mark="${D}○${R}" what="skipped · $again $id any time" ;;
   esac
   summary+="$mark $("$(fn label "$id")")"$'\x1f'"$D$what$R"$'\n'
 done
 printf '%s' "$summary" | print_table 3 | sed 's/\x1b\[[0-9;]*m//g' >>"$log_file"
 if [[ -t 1 ]]; then
   printf '%s' "$summary" | print_table 3 |
-    ui_box "done" "open a new terminal to pick it up" 0 "$(ui_hint "undo: ./uninstall.sh")"
+    ui_box "done" "open a new terminal to pick it up" 0 "$(ui_hint "undo: $undo")"
   say "${D}log: ${log_file/#$HOME/\~}${R}"
 else
   printf '%s' "$summary" | print_table 3
