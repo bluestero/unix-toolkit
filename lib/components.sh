@@ -40,6 +40,17 @@ group_of() {
   elif [[ " ${CLAUDE_PARTS[*]} " == *" $1 "* ]]; then echo "Claude Code"
   else echo Optional; fi
 }
+# One line on what each group is, on top of its tab in the installer; a layer adds its own
+# groups' (GROUP_ABOUT[AirPR]=...).
+declare -gA GROUP_ABOUT=(
+  [Recommended]="The everyday basics: the toolkit in bash, its commands, completion, the prompt, a newer fzf."
+  [Kitty]="The kitty terminal, its settings, and how it looks."
+  ["Desktop (GNOME)"]="GNOME extensions and shortcuts: windows, app keys, the launcher, the dock and top bar."
+  [Optional]="Extras: zsh, btop, the yazi file manager, direnv for folder pins."
+  [Cloud]="What okcli and kx run on: Okta sign-in for AWS, the aws command, kubectl, your EKS clusters."
+  [Workspaces]="Your repos, cloned from your workspace list (ws edit)."
+  ["Claude Code"]="Claude Code knows the toolkit, starts each session knowing your profile and cluster, follows the guidelines."
+)
 
 # What a component needs from the machine itself (see lib/platform.sh). Anything
 # not listed works wherever bash does. A component whose needs aren't met gets

@@ -21,7 +21,7 @@ Every command speaks the same words: `<tool>` picker, `<tool> <name>` switch, `l
 
 ## Set it up on your machine (teammates)
 
-For Ubuntu with GNOME. About 10 minutes; nothing changes without asking first. On other systems (Arch, KDE, macOS) the installer checks each part against the machine and marks what can't run there `⊘ not supported here`, with the reason (needs GNOME, needs apt, Linux only for now); those are left out of the checklist.
+For Ubuntu with GNOME. About 10 minutes; nothing changes without asking first. On other systems (Arch, KDE, macOS) the installer checks each part against the machine and marks what can't run there `⊘ not supported here`, with the reason (needs GNOME, needs apt, Linux only for now); those can't be ticked.
 
 **1. Have git and curl.** The one command below needs them (`sudo apt install git curl`).
 Everything the tools run on comes with the installer, the latest release for your CPU, in
@@ -40,7 +40,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/bluestero/unix-toolkit/main/
 layer; repeat it for more) adds a layer in the same go. Or clone it yourself, anywhere, and run
 `./install.sh`: the installer records where it is.
 
-**3. Install.** A checklist of every part, all ticked, so Enter sets it all up; untick what you
+**3. Install.** A tab per group of parts, each ticked, so Enter twice sets it all up; untick what you
 don't want. Each change still asks first (Enter = yes).
 
 ```bash
@@ -105,7 +105,7 @@ Copying a folder into `layers/` works too (no updates then). Everything in a lay
 |---|---|
 | `bin/` | on PATH in every shell |
 | `shell/init.sh` | sourced by bash and zsh before the tools load: settings they read (`OKTA_AWSCLI_ORG_DOMAIN`, `OKTA_AWSCLI_OIDC_CLIENT_ID`, `OKCLI_NAMING_DEFAULT`, `KX_ALIAS_RULES`), aliases |
-| `components.sh` | installer components (`COMPONENTS+=(…)` and the usual functions; `group_<id>` names the checklist group) |
+| `components.sh` | installer components (`COMPONENTS+=(…)` and the usual functions; `group_<id>` names its installer tab, `GROUP_ABOUT[<group>]="…"` says what a new group is) |
 | `tools` | commands for `tk ls` and the `tk` picker: `name\|group\|what it does\|program it needs` |
 | `workspaces` | a shared `ws` list; `@<name>` in your own list brings it in |
 | `claude/skills/<skill>/` | Claude Code skills, linked by the `claude-skill` component |
@@ -132,17 +132,25 @@ tk layer add https://github.com/bluestero/unix-feelkit.git   # clones into layer
 
 ```bash
 ./install.sh ls          # what's installed
-./install.sh             # checklist of what's missing, then one question per change (Enter = yes)
+./install.sh             # a tab per group: tick what to set up, then one question per change (Enter = yes)
 ./install.sh zsh         # just one part
 ./install.sh --dry-run   # preview; --details also shows diffs
 ./uninstall.sh           # checklist of what's installed; pick what to remove
 ./install.sh --plain     # never use or offer gum
 ```
 
-The checklist splits into **Recommended** (bash, keys, commands, starship) and **Optional**
-(kitty and zsh extras), all ticked: Enter sets everything up, and each change still asks first.
+The installer opens on a tab per group (Recommended, Kitty, Optional, Desktop, Cloud, Workspaces,
+Claude Code, then each layer's own). A tab says in one line what the group is, then lists its parts
+with their state (installed, partly, not installed, not supported here) and what each gets you; the
+footer shows what the part under the cursor touches on disk. ←/→ or Tab change tabs, Space ticks,
+Enter goes to the **Summary** tab: everything that will be set up, with what `--dry-run` prints for the
+part under the cursor. Enter there sets it up; Esc anywhere leaves with nothing changed. With both
+bars ticked (Dash2Dock and Dash to Panel, or one ticked and the other already in), the summary asks
+once whether to keep both (No goes back to the Desktop tab). Needs fzf 0.63+ (`./install.sh fzf`);
+with an older fzf it's one checklist instead. Missing parts are ticked except `yazi-keys` (an extra)
+and Dash2Dock when Dash to Panel is in.
 If [gum](https://github.com/charmbracelet/gum) isn't installed, the installer offers to fetch it
-(v2.0.2, checksum-checked, into `~/.local/bin`, no sudo) for nicer lists and questions; say no
+(v2.0.2, checksum-checked, into `~/.local/bin`, no sudo) for nicer questions (and the checklist); say no
 and the plain built-in ones are used. Remove it with `rm ~/.local/bin/gum`.
 
 Both are safe to run any number of times: they check first and only touch what's missing

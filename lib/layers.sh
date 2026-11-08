@@ -7,7 +7,8 @@
 #                     settings the tools read (OKTA_AWSCLI_*, KX_ALIAS_RULES, ...), aliases
 #   components.sh     installer components: COMPONENTS+=(id ...), the usual
 #                     label_/title_/detail_/state_/install_/uninstall_ functions,
-#                     and group_<id> to name its group in the checklist
+#                     group_<id> to name its group (its installer tab), and
+#                     GROUP_ABOUT[<group>]="one line" for a group of its own
 #   tools             lines for tk:  name|group|what it does|program it needs
 #   workspaces        a shared ws list; "@<name>" in your own list brings it in
 #   claude/skills/*/  Claude Code skills, linked by the claude-skill component

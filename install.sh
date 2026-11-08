@@ -25,11 +25,12 @@ done
 setup_phase=install   # lets lib/setup.sh keep your originals (see "originals" there)
 . "$repo/lib/setup.sh"
 . "$repo/lib/components.sh"
+. "$repo/lib/tabs.sh"
 
 if (( help )); then
   ui_help ./install.sh "set up the work toolkit" <<'EOF'
 ## Commands
-./install.sh	checklist of what's missing, then one question per change	Enter = yes
+./install.sh	a tab per group: tick what to set up, then one question per change	Enter = yes
 ./install.sh <component>...	just those, e.g. ./install.sh zsh
 ./install.sh ls	every component and whether it's installed
 ./install.sh help	this page
@@ -75,14 +76,19 @@ badge() {
   esac
 }
 
+# Dash2Dock and Dash to Panel both replace Ubuntu's dock: with the panel in, leave the dock unticked.
+# yazi-keys is an extra: unticked until you choose it.
+on_by_default() { [[ $1 != yazi-keys ]] && ! { [[ $1 == dash2dock ]] && d2d_other_bar; }; }
+
 logf ""; logf "=== install $ts ($mode) ${wanted[*]}"
 # Overview: every component and its state, grouped, in one box.
 todo=() prev="" table=""
 if (( list )); then table+="${B}COMPONENT${R}"$'\x1f'"${B}KIT${R}"$'\x1f'"${B}STATE${R}"$'\x1f'"${B}NOTE${R}"$'\n'
 else table+="${B}COMPONENT${R}"$'\x1f'"${B}STATE${R}"$'\x1f'"${B}NOTE${R}"$'\n'; fi
 skipped=0
+declare -A ST=() NT=()   # each one's state and note, for the tabs
 for id in "${wanted[@]}"; do
-  component_state "$id"
+  component_state "$id"; ST[$id]=$STATE NT[$id]=$NOTE
   [[ "$STATE" == unsupported ]] && (( skipped++ ))
   if (( ! named )) && [[ "$(group_of "$id")" != "$prev" ]]; then
     [[ -n "$prev" ]] && table+=$'\n'
@@ -108,19 +114,30 @@ if (( quick )); then
   for id in "${todo[@]}"; do "$(fn install "$id")"; done
   exit 0
 fi
-say ""
-if (( ${#todo[@]} )); then right="${#todo[@]} to set up"; else right="${G}all set${R}"; fi
-printf '%s' "$table" | ui_table "work toolkit" "$right"
+# A full setup in a terminal opens on the tabs (fzf 0.63+: its footer); else the checklist below.
+tabs=0
+[[ "$mode" == ask && $named == 0 && $list == 0 && ${#todo[@]} -gt 0 && -t 1 ]] && ui_fzf_at_least 0.63 && tabs=1
 printf '%s' "$table" | print_table 3 | sed 's/\x1b\[[0-9;]*m//g' >>"$log_file"
-# Which machine this is, and what that rules out (the reasons are in the NOTE column).
-say "${D}This machine: $OS_NAME · $DESKTOP_NAME · ${PKG_MGR/none/no package manager}${R}"
-(( skipped )) && say "${D}$skipped component(s) can't run here and are skipped (⊘ above, with the reason).${R}"
-(( list )) && exit 0
-say ""
+if (( ! tabs )); then
+  say ""
+  if (( ${#todo[@]} )); then right="${#todo[@]} to set up"; else right="${G}all set${R}"; fi
+  printf '%s' "$table" | ui_table "work toolkit" "$right"
+  # Which machine this is, and what that rules out (the reasons are in the NOTE column).
+  say "${D}This machine: $OS_NAME · $DESKTOP_NAME · ${PKG_MGR/none/no package manager}${R}"
+  (( skipped )) && say "${D}$skipped component(s) can't run here and are skipped (⊘ above, with the reason).${R}"
+  (( list )) && exit 0
+  say ""
+fi
 if (( ${#todo[@]} == 0 )); then
   if (( skipped == ${#wanted[@]} )); then say "None of these can run on this machine. Nothing to do."
   else say "Everything is already set up. Nothing to do."; fi
   exit 0
+fi
+
+if (( tabs )); then
+  tabs_pick || { say "Cancelled. Nothing changed."; exit 0; }
+  (( ${#todo[@]} )) || { say "Nothing picked. Nothing changed."; exit 0; }
+  logf "picked: ${todo[*]}"
 fi
 
 # Use gum when it's there. Only a full setup (no components named) offers to
@@ -139,7 +156,7 @@ fi
 
 # Pick what to set up (all ticked; untick with space). Named components or
 # --yes / --dry-run skip the list.
-if [[ "$mode" == ask && $named == 0 ]]; then
+if [[ "$mode" == ask && $named == 0 ]] && (( ! tabs )); then
   say "Everything below is ticked, so ${B}Enter${R} sets it all up. Untick anything you don't want."
   say "${D}Each change still asks first (Enter = yes), and ./uninstall.sh undoes any of it.${R}"
   say ""
@@ -148,9 +165,7 @@ if [[ "$mode" == ask && $named == 0 ]]; then
     if [[ "$(group_of "$id")" != "$prev" ]]; then
       prev=$(group_of "$id"); labels+=("## $prev"); ids+=("")
     fi
-    # Dash2Dock and Dash to Panel both replace Ubuntu's dock: with the panel in, leave the dock unticked
-    # yazi-keys is an extra: unticked until you choose it
-    [[ $id == yazi-keys ]] || { [[ $id == dash2dock ]] && d2d_other_bar; } || on+="${#labels[@]} "
+    on_by_default "$id" && on+="${#labels[@]} "
     labels+=("$id"$'\t'"$("$(fn title "$id")")"); ids+=("$id")
   done
   CHECKLIST_ON=$on checklist "Pick what to set up:" "${labels[@]}" || { say "Cancelled. Nothing changed."; exit 0; }
