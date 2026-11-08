@@ -36,7 +36,8 @@ it if it's there) and adds the `tk` command. Nothing else changes yet.
 bash <(curl -fsSL https://raw.githubusercontent.com/bluestero/unix-toolkit/main/bootstrap.sh)
 ```
 
-`--dir <folder>` puts the toolkit elsewhere. Or clone it yourself, anywhere, and run
+`--dir <folder>` puts the toolkit elsewhere. `--layer feelkit` (or `--layer <git URL>` for any other
+layer; repeat it for more) adds a layer in the same go. Or clone it yourself, anywhere, and run
 `./install.sh`: the installer records where it is.
 
 **3. Install.** A checklist of every part, all ticked, so Enter sets it all up; untick what you
