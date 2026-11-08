@@ -290,4 +290,9 @@ shell/inputrc               bash key settings
 zsh/zshrc                   zsh setup
 install.sh / uninstall.sh   set up / remove, per component
 bootstrap.sh                the one-command download (clone or pull, add the tk command)
+tests/                      kept tests (see below)
 ```
+
+## Tests
+
+`tests/run.sh` drives the pickers in a pseudo-terminal, with a scratch HOME and fake system commands, so it never touches your settings, cloud or cluster (needs `uv`). Add a name to run one file of `tests/cases/` (e.g. `tests/run.sh kx`). `tests/run.sh speed` times keys and start-up against the budgets in `tests/cases/speed.py`.
