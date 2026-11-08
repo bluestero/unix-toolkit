@@ -53,7 +53,8 @@ def test_enter_shows_the_choices_and_esc_goes_back(sb):
     t.wait_for("esc close")
     assert t.alive(), "esc on the choices goes back to the list"
     t.key("esc")
-    t.wait_exit()   # exits 130 (fzf's esc), unlike okcli / kx / ws: noted 2026-11-09
+    code = t.wait_exit()
+    assert code == 0, f"esc should close it cleanly, exit code {code}"
 
 
 def test_reset_then_no_changes_nothing(sb):

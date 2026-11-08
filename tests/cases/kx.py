@@ -60,18 +60,17 @@ def test_prod_default_yes_sets_it_and_stays(sb):
 
 
 # ------------------------------------------------------------- kx sync
-# Two clusters: shop-dev-eks is added already, shop-new-eks is new. (With one row,
-# unticking it sends the cursor row as "ticked": fzf's {+} with nothing ticked.)
-def sync(sb):
+# shop-dev-eks is added already, shop-new-eks is new
+def sync(sb, clusters="shop-dev-eks shop-new-eks"):
     kube(sb)
-    sb.write(sb.fix + "/clusters-shop-dev", "shop-dev-eks shop-new-eks\n")
+    sb.write(sb.fix + "/clusters-shop-dev", clusters + "\n")
     sb.write(sb.fix + "/clusters-shop-prod", "")
     t = Term([KX, "sync"], sb.env)
     t.wait_for("which AWS accounts?")
     t.settle()
     t.key("enter")
     t.wait_for("which clusters?")
-    t.wait_for("shop-new-eks")
+    t.wait_for(clusters.split()[-1])
     t.settle()
     return t
 
@@ -94,6 +93,26 @@ def test_sync_unticking_then_yes_removes_it(sb):
     t.key("y")
     t.wait_exit()
     assert "name: shop-dev" not in sb.read("~/.kube/config")
+
+
+def test_sync_unticking_the_only_cluster_still_asks(sb):
+    t = sync(sb, "shop-dev-eks")
+    t.key("ctrl-a", "enter")                    # all/none: nothing ticked, apply
+    t.wait_for("(unticked)?")
+    t.key("y")
+    t.wait_exit()
+    assert "name: shop-dev" not in sb.read("~/.kube/config")
+
+
+def test_sync_unticking_every_account_searches_none(sb):
+    kube(sb)
+    t = Term([KX, "sync"], sb.env)
+    t.wait_for("which AWS accounts?")
+    t.settle()
+    t.key("ctrl-a", "enter")
+    t.wait_exit()
+    assert "No accounts ticked" in t.flat()
+    assert not any("list-clusters" in c for c in sb.calls("aws")), sb.calls("aws")
 
 
 # ------------------------------------------------------------- kx pods
@@ -130,8 +149,11 @@ def test_pods_restart_yes_deletes_the_pod(sb):
     t.wait_for("A fresh pod replaces it")
     t.key("y")
     t.wait_for("is being replaced")
-    t.settle()   # an esc within ~0.1 s of the result is lost (found 2026-11-09, not fixed)
     assert t.alive(), "the list should stay open"
+    t.pause(0.05)              # 50 ms on: fzf --track ignores keys while it reloads, which used to
+    t.key("x", gap=0.5)        # take a whole kubectl call (> 0.15 s even with the fake one)
+    assert "pods> x" in t.flat(), "the key pressed after the result was lost"
+    t.key("bs")
     assert any(c.startswith("kubectl delete pod web-7d4b9c-abcde") for c in sb.calls("kubectl")), sb.calls("kubectl")
     t.key("esc")
     t.wait_exit()

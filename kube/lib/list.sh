@@ -133,7 +133,16 @@ list_rows() {   # prints the rows (header line first); keeps a copy for relaunch
   printf '%s\n' "$out" | tee "$S/rows.new" | ui_sort_feed && mv "$S/rows.new" "$S/rows"   # in the column sort
 }
 # Always the LAST action in a chain: with --track --id-nth, fzf drops actions after a reload.
-list_reload() { printf 'reload(%s rows)' "$(list_cb_cmd)"; }
+# It also ignores keys until the reload is done, so a background job (a reload nobody
+# pressed a key for) fetches the rows first and fzf's reload only reads them.
+list_reload() {
+  if [[ -n "${LIST_JOB:-}" ]]; then
+    local f; f=$(mktemp "$S/reload.XXXXXX") && list_rows >"$f" 2>/dev/null &&
+      { printf 'reload(cat %q; rm -f %q)' "$f" "$f"; return; }
+    rm -f "$f"
+  fi
+  printf 'reload(%s rows)' "$(list_cb_cmd)"
+}
 
 # Where a row is in the list as fzf shows it for this filter (1 = top).
 list_pos() {   # ns name query

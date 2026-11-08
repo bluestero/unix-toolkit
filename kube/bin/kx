@@ -226,6 +226,7 @@ cmd_syncgate() {   # key ticked-rows...
     ip_set answer "$a"; echo accept; return
   fi
   [[ $k == esc ]] && { echo abort; return; }
+  (( ${FZF_SELECT_COUNT:-1} )) || set --   # nothing ticked: {+} would be the cursor row
   chosen=$(for c in "$@"; do strip_ansi "$c" | awk '{ print $2 }'; done)
   printf '%s\n' "$chosen" >"$IP/chosen"
   while IFS=$'\t' read -r alias cluster status; do
@@ -736,6 +737,8 @@ cmd_sync() {
       while IFS=$'\t' read -r a _ _; do
         i=$((i + 1)); _ign "$a" && bind+="+pos($i)+deselect"
       done <<<"$accts"
+      # with nothing ticked fzf prints the cursor row, so enter notes how many are ticked
+      local nsel; nsel=$(mktemp)
       picked=$({ printf 'ACCOUNT\x1fID\x1fROLES\x1f\n'
         while IFS=$'\t' read -r a l p; do
           set -- $p
@@ -744,7 +747,11 @@ cmd_sync() {
         done <<<"$accts"; } |
         ui_fzf 'kx sync · which AWS accounts?' --sortable --multi --header-lines=1 --marker='✓' --prompt='filter> ' \
           --header='tab: tick/untick · ctrl-a: all/none · enter: search the ticked · unticked ones are skipped from now on' \
-          --bind="load:select-all${bind}+first,ctrl-a:toggle-all" | awk '{ print $2 }') || { info "Cancelled."; return 0; }
+          --bind="load:select-all${bind}+first,ctrl-a:toggle-all" \
+          --bind="enter:execute-silent(echo \$FZF_SELECT_COUNT >$(printf %q "$nsel"))+accept" |
+        awk '{ print $2 }') || { rm -f "$nsel"; info "Cancelled."; return 0; }
+      [[ $(<"$nsel") == 0 ]] && picked=""
+      rm -f "$nsel"
       # Remember the choice: unticked → ignore list, ticked → off it.
       while IFS=$'\t' read -r a l _; do
         if grep -qxF "$a" <<<"$picked"; then _ign "$a" && ignore_del "$a"

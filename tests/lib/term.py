@@ -205,6 +205,12 @@ class Term:
             while time.monotonic() < end and self._pump(0.01):
                 pass
 
+    def pause(self, secs):
+        """Let the program run (reading its output) for secs."""
+        end = time.monotonic() + secs
+        while time.monotonic() < end and self._pump(0.005):
+            pass
+
     def timed_key(self, k, cond=None, timeout=5.0):
         """Send one key; the seconds until the screen changes (or cond holds)."""
         before = self.text()
