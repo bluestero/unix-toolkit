@@ -1,0 +1,14 @@
+# Added by the work toolkit (component yazi-keys). Remove it with ./uninstall.sh yazi-keys.
+
+# ctrl+backspace (kitty sends it as alt+backspace) deletes a word in yazi's text fields
+# (search, rename, ...), as in a terminal.
+[[input.prepend_keymap]]
+on   = "<A-Backspace>"
+run  = "kill backward"
+desc = "Delete the word before the cursor"
+
+# > picks a folder inside the current one (up to 6 levels down, no hidden ones) with fzf and goes there.
+[[mgr.prepend_keymap]]
+on   = ">"
+run  = '''shell --block -- d=$(find "$PWD" -mindepth 1 -maxdepth 6 -type d -not -path '*/.*' | fzf --prompt='folder> ') && [ -n "$d" ] && ya emit cd "$d"'''
+desc = "Go to a folder inside this one (fzf)"

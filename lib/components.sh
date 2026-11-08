@@ -17,7 +17,7 @@
 # shellcheck source=layers.sh
 . "$repo/lib/layers.sh"
 
-COMPONENTS=(bash keys commands starship fzf kitty kitty-config kitty-nautilus zsh login-shell btop yazi direnv window-calls alt-tab-desktop hide-docker-tray app-keys rofi okta-aws-cli aws-cli kubectl eks-clusters repos claude-skill claude-hook claude-guidelines)
+COMPONENTS=(bash keys commands starship fzf kitty kitty-config kitty-nautilus zsh login-shell btop yazi yazi-keys direnv window-calls alt-tab-desktop hide-docker-tray app-keys rofi okta-aws-cli aws-cli kubectl eks-clusters repos claude-skill claude-hook claude-guidelines)
 # Shown in groups in the checklist; the rest are optional extras.
 RECOMMENDED=(bash keys commands starship fzf)
 KITTY_PARTS=(kitty kitty-config kitty-nautilus)
@@ -50,7 +50,7 @@ requires_of() {
   # a layer's component names its own needs (requires_<id>)
   if declare -F "$(fn requires "$1")" >/dev/null; then "$(fn requires "$1")"; return; fi
   case "$1" in
-    fzf|kitty|login-shell|yazi|direnv|okta-aws-cli|aws-cli|kubectl) echo "linux" ;;
+    fzf|kitty|login-shell|yazi|yazi-keys|direnv|okta-aws-cli|aws-cli|kubectl) echo "linux" ;;
     zsh|btop)                              echo "apt" ;;
     kitty-nautilus|rofi)                   echo "gnome apt" ;;
     window-calls|alt-tab-desktop|hide-docker-tray|app-keys) echo "gnome" ;;
@@ -428,6 +428,37 @@ uninstall_yazi() {
   ok "removed ${D}(your ~/.config/yazi stays)${R}"
 }
 
+# Optional: two keys for yazi, as a marked block in ~/.config/yazi/keymap.toml (added to
+# the file if there is one, the file made if not; uninstall takes out only the block).
+yk_src="$repo/yazi/keymap.toml"
+yk_file="$HOME/.config/yazi/keymap.toml"
+label_yazi_keys() { echo "yazi keys"; }
+title_yazi_keys() { echo "yazi: > picks a folder inside this one; ctrl+backspace deletes a word"; }
+detail_yazi_keys() { echo "a marked block from yazi/keymap.toml in ~/.config/yazi/keymap.toml (the file is made if it's missing); needs fzf"; }
+# yazi's keymap can't have both prepend_keymap = [...] and [[...prepend_keymap]] for one layer:
+# true when the file already has the first form, outside our block
+yk_clash() { [[ -f "$yk_file" ]] && awk -v s="$BLOCK_START" -v e="$BLOCK_END" '$0==s{f=1;next} $0==e{f=0;next} !f' "$yk_file" | grep -qE '^[[:space:]]*prepend_keymap[[:space:]]*='; }
+state_yazi_keys() { NOTE=""
+  command -v yazi >/dev/null || { STATE=n/a; NOTE="yazi isn't installed"; return; }
+  if has_block "$yk_file" "$(<"$yk_src")"; then STATE=installed
+  elif grep -qxF "$BLOCK_START" "$yk_file" 2>/dev/null; then STATE=partial; NOTE="out of date"
+  else STATE=missing; fi; }
+install_yazi_keys() {
+  has_block "$yk_file" "$(<"$yk_src")" && { ok "already there"; return; }
+  if yk_clash; then
+    warn "${yk_file/#$HOME/\~} already has prepend_keymap = [ ... ] lines, which can't sit next to the toolkit's keys."
+    info "    Add the entries from $yk_src to your own list instead."; skip; return
+  fi
+  if ask "Add the keys to ${yk_file/#$HOME/\~}? (> picks a folder inside this one; ctrl+backspace deletes a word; the rest of the file stays yours)"; then
+    dry && return
+    mkdir -p "$(dirname "$yk_file")" && set_block "$yk_file" "$(<"$yk_src")" && ok "done ${D}(open yazi and try >)${R}"
+  else skip; fi
+}
+uninstall_yazi_keys() {
+  grep -qxF "$BLOCK_START" "$yk_file" 2>/dev/null || { ok "not there"; return 0; }
+  drop_block "$yk_file"; ok "removed from ${yk_file/#$HOME/\~}"
+}
+
 # ----------------------------------------------------------------- zsh ---
 zsh_pkgs=(zsh zsh-autosuggestions)
 zshrc_body="[ -f \"$repo/zsh/zshrc\" ] && . \"$repo/zsh/zshrc\""
@@ -555,39 +586,55 @@ look_reset() {   # look_reset PATH NAME: the app's defaults, or your settings fr
   else ok "$2 settings back to the app's defaults"; fi
   rm -f "$f" "$orig_dir/$2.last.dconf"
 }
+look_note() {   # look_note PATH BEFORE: what the last action changed, in words
+  local n; n=$(diff <(printf '%s\n' "$2") <(dconf dump "$1" 2>/dev/null) | sed -n 's/^[<>] \([^=]*\)=.*/\1/p' | sort -u | wc -l)
+  if (( n )); then printf '%s setting%s changed' "$n" "$([[ $n == 1 ]] || echo s)"; else printf 'nothing changed'; fi
+}
 # look_menu PATH FILE NAME NICE [IGNORE]: what to do with the settings of an extension that
 # is already installed: keep, re-apply the toolkit look, reset to the app's defaults, put back
 # the settings from before the toolkit, or (when a copy exists) undo the last change. Each says
 # how many settings it changed; the settings from just before a change are kept once.
-look_menu() {
-  local path=$1 file=$2 name=$3 nice=$4 ign=${5:-} last="$orig_dir/$3.last.dconf" first="$orig_dir/$3.dconf" state pick q rows before
-  local keep="Keep my settings" app="Re-apply the toolkit look" rst="Reset to the app's defaults" und="Undo the last change"
-  local pre="Put back my settings from before the toolkit"
-  if look_applied "$path" "$file" "$ign"; then state="match the toolkit look"; else state="differ from the toolkit look"; fi
-  case "$mode" in
-    dry) say "  ${C}?${R} $nice settings $state ${D}(dry run: not asked)${R}"; return 0 ;;
-    yes) look_applied "$path" "$file" "$ign" && { ok "look already applied"; return 0; }; pick=$app ;;
-    *)
-      if ! command -v fzf >/dev/null || [[ ! -t 0 ]]; then ok "$nice settings kept"; return 0; fi
-      rows="$keep"$'\n'"$app"$'\n'"$rst"; grep -q = "$first" 2>/dev/null && rows+=$'\n'"$pre"; [[ -f $last ]] && rows+=$'\n'"$und"
-      q="${C_BOLD}$nice settings $state${C_RESET}"
-      pick=$(printf '%s\n' "$rows" | ui_fzf "${UI_CONFIRM_LABEL:-settings}" --height=~60% --info=hidden \
-        --no-separator --prompt='  ' --header="$q") || pick=$keep ;;
-  esac
+LOOK_KEEP="Keep my settings"; LOOK_APP="Re-apply the toolkit look"; LOOK_RST="Reset to the app's defaults"
+LOOK_UND="Undo the last change"; LOOK_PRE="Put back my settings from before the toolkit"
+# look_choices NAME: the menu's choices, one per line (the last two only when there is something to go back to)
+look_choices() {
+  printf '%s\n%s\n%s\n' "$LOOK_KEEP" "$LOOK_APP" "$LOOK_RST"
+  grep -q = "$orig_dir/$1.dconf" 2>/dev/null && printf '%s\n' "$LOOK_PRE"
+  [[ -f "$orig_dir/$1.last.dconf" ]] && printf '%s\n' "$LOOK_UND"
+  return 0
+}
+# look_do PATH FILE NAME NICE PICK: does a choice (no questions; asking first is the caller's job)
+look_do() {
+  local path=$1 file=$2 name=$3 nice=$4 pick=$5 last="$orig_dir/$3.last.dconf" first="$orig_dir/$3.dconf" before
   before=$(dconf dump "$path" 2>/dev/null)
   case "$pick" in
-    "$app") mkdir -p "$orig_dir"; printf '%s\n' "$before" >"$last"
+    "$LOOK_APP") mkdir -p "$orig_dir"; printf '%s\n' "$before" >"$last"
             look_apply "$path" "$file" "$name" && ok "$nice look applied ${D}($(look_note "$path" "$before"); the menu can undo it)${R}" ;;
-    "$rst") ask "Reset $nice to the app's defaults? (the menu can undo it)" n || { skip; return 0; }
-            mkdir -p "$orig_dir"; printf '%s\n' "$before" >"$last"
+    "$LOOK_RST") mkdir -p "$orig_dir"; printf '%s\n' "$before" >"$last"
             dconf reset -f "$path" && ok "$nice settings back to the app's defaults ${D}($(look_note "$path" "$before"); the menu can undo it)${R}" ;;
-    "$pre") mkdir -p "$orig_dir"; printf '%s\n' "$before" >"$last"
+    "$LOOK_PRE") mkdir -p "$orig_dir"; printf '%s\n' "$before" >"$last"
             dconf reset -f "$path"; dconf load "$path" <"$first" &&
               ok "$nice settings back to how they were before the toolkit ${D}($(look_note "$path" "$before"); the menu can undo it)${R}" ;;
-    "$und") dconf reset -f "$path"; dconf load "$path" <"$last" && rm -f "$last" &&
+    "$LOOK_UND") dconf reset -f "$path"; dconf load "$path" <"$last" && rm -f "$last" &&
               ok "$nice settings back to before the last change ${D}($(look_note "$path" "$before"))${R}" ;;
     *) ok "$nice settings kept" ;;
   esac
+}
+look_menu() {
+  local path=$1 file=$2 name=$3 nice=$4 ign=${5:-} state pick q rows
+  if look_applied "$path" "$file" "$ign"; then state="match the toolkit look"; else state="differ from the toolkit look"; fi
+  case "$mode" in
+    dry) say "  ${C}?${R} $nice settings $state ${D}(dry run: not asked)${R}"; return 0 ;;
+    yes) look_applied "$path" "$file" "$ign" && { ok "look already applied"; return 0; }; pick=$LOOK_APP ;;
+    *)
+      if ! command -v fzf >/dev/null || [[ ! -t 0 ]]; then ok "$nice settings kept"; return 0; fi
+      rows=$(look_choices "$name")
+      q="${C_BOLD}$nice settings $state${C_RESET}"
+      pick=$(printf '%s\n' "$rows" | ui_fzf "${UI_CONFIRM_LABEL:-settings}" --height=~60% --info=hidden \
+        --no-separator --prompt='  ' --header="$q") || pick=$LOOK_KEEP ;;
+  esac
+  if [[ $pick == "$LOOK_RST" ]]; then ask "Reset $nice to the app's defaults? (the menu can undo it)" n || { skip; return 0; }; fi
+  look_do "$path" "$file" "$name" "$nice" "$pick"
 }
 # A GNOME extension from extensions.gnome.org plus its look. gx_state UUID PATH FILE [IGNORE];
 # gx_install UUID NAME PATH FILE [IGNORE]
@@ -1290,10 +1337,13 @@ unset _layer _n _id
 # A layer's components land at the end of COMPONENTS; bring each group together again, groups
 # in the order they first appear and components in their order inside a group.
 _regroup() {
-  local id g; local -a order=() out=()
-  for id in "${COMPONENTS[@]}"; do g=$(group_of "$id"); [[ " ${order[*]} " == *" ${g// /_} "* ]] || order+=("${g// /_}"); done
+  local id g; local -a order=() out=(); local -A grp=()
+  for id in "${COMPONENTS[@]}"; do   # each group asked once (a subshell per ask made loading take a second)
+    g=$(group_of "$id"); grp[$id]=$g
+    [[ " ${order[*]} " == *" ${g// /_} "* ]] || order+=("${g// /_}")
+  done
   for g in "${order[@]}"; do
-    for id in "${COMPONENTS[@]}"; do [[ $(group_of "$id") == "${g//_/ }" ]] && out+=("$id"); done
+    for id in "${COMPONENTS[@]}"; do [[ ${grp[$id]} == "${g//_/ }" ]] && out+=("$id"); done
   done
   COMPONENTS=("${out[@]}")
 }

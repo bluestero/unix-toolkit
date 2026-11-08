@@ -149,7 +149,8 @@ if [[ "$mode" == ask && $named == 0 ]]; then
       prev=$(group_of "$id"); labels+=("## $prev"); ids+=("")
     fi
     # Dash2Dock and Dash to Panel both replace Ubuntu's dock: with the panel in, leave the dock unticked
-    [[ $id == dash2dock ]] && d2d_other_bar || on+="${#labels[@]} "
+    # yazi-keys is an extra: unticked until you choose it
+    [[ $id == yazi-keys ]] || { [[ $id == dash2dock ]] && d2d_other_bar; } || on+="${#labels[@]} "
     labels+=("$id"$'\t'"$("$(fn title "$id")")"); ids+=("$id")
   done
   CHECKLIST_ON=$on checklist "Pick what to set up:" "${labels[@]}" || { say "Cancelled. Nothing changed."; exit 0; }
