@@ -15,7 +15,7 @@
 # shellcheck source=platform.sh
 . "$repo/lib/platform.sh"
 
-COMPONENTS=(bash keys commands starship fzf kitty kitty-config kitty-bg kitty-theme kitty-accents kitty-icons kitty-nautilus kitty-centered zsh login-shell btop yazi window-calls alt-tab-desktop dash2dock dash-to-panel hide-docker-tray app-keys no-animations vitals vitals-icons blur-my-shell rounded-corners rofi eks-clusters repos claude-skill claude-hook claude-guidelines)
+COMPONENTS=(bash keys commands starship fzf kitty kitty-config kitty-bg kitty-theme kitty-accents kitty-icons kitty-nautilus kitty-centered zsh login-shell btop yazi direnv window-calls alt-tab-desktop dash2dock dash-to-panel hide-docker-tray app-keys no-animations vitals vitals-icons blur-my-shell rounded-corners rofi okta-aws-cli aws-cli kubectl eks-clusters repos claude-skill claude-hook claude-guidelines)
 # Shown in groups in the checklist; the rest are optional extras.
 RECOMMENDED=(bash keys commands starship fzf)
 KITTY_PARTS=(kitty kitty-config kitty-bg kitty-theme kitty-accents kitty-icons kitty-nautilus kitty-centered)
@@ -24,7 +24,7 @@ DESKTOP_PARTS=(window-calls alt-tab-desktop dash2dock dash-to-panel hide-docker-
 LOOK_PARTS=(dash-to-panel vitals blur-my-shell rounded-corners)
 WORKSPACE_PARTS=(repos)
 CLAUDE_PARTS=(claude-skill claude-hook claude-guidelines)
-CLOUD_PARTS=(eks-clusters)
+CLOUD_PARTS=(okta-aws-cli aws-cli kubectl eks-clusters)
 group_of() {
   # a layer's component names its own group (group_<id>)
   if declare -F "$(fn group "$1")" >/dev/null; then "$(fn group "$1")"
@@ -44,7 +44,7 @@ group_of() {
 #   apt    installs packages with apt
 requires_of() {
   case "$1" in
-    fzf|kitty|login-shell|yazi)            echo "linux" ;;
+    fzf|kitty|login-shell|yazi|direnv|okta-aws-cli|aws-cli|kubectl) echo "linux" ;;
     zsh|btop|kitty-bg|kitty-icons)         echo "apt" ;;
     kitty-nautilus|rofi)                   echo "gnome apt" ;;
     kitty-centered|window-calls|alt-tab-desktop|dash2dock|dash-to-panel|hide-docker-tray|app-keys|no-animations|vitals|vitals-icons|blur-my-shell|rounded-corners) echo "gnome" ;;
@@ -185,12 +185,16 @@ uninstall_commands() {
 ss="$HOME/.config/starship.toml"; ss_src="$repo/starship/starship.toml"
 label_starship() { echo "Starship prompt"; }
 title_starship() { echo "Prompt showing git branch, k8s cluster, AWS profile and PROD warnings"; }
-detail_starship() { echo "prompt config (git, python, k8s, AWS profile + expiry, PROD markers)"; }
+detail_starship() { echo "prompt config (git, python, k8s, AWS profile + expiry, PROD markers); starship itself, latest from GitHub (sha256-checked), in ~/.local/bin if it isn't installed"; }
 state_starship() { NOTE=""; if linked "$ss" "$ss_src"; then STATE=installed; else STATE=missing; fi
-  command -v starship >/dev/null || NOTE="starship itself isn't installed"; }
-install_starship() { linked "$ss" "$ss_src" && { ok "already linked"; return; }
+  command -v starship >/dev/null || { NOTE="starship itself isn't installed"; [[ $STATE == installed ]] && STATE=partial; }; }
+install_starship() {
+  get_tool starship "the prompt itself" "about 5 MB" fetch_starship
+  linked "$ss" "$ss_src" && { ok "already linked"; return; }
   ask "Switch to the toolkit's starship prompt?" && link_file "$ss" "$ss_src" || skip; }
-uninstall_starship() { unlink_file "$ss" "$ss_src"; }
+fetch_starship() { local a; case "$(dl_arch)" in amd64) a=x86_64 ;; arm64) a=aarch64 ;; esac
+  gh_tool starship/starship "starship-$a-unknown-linux-musl.tar.gz" starship; }
+uninstall_starship() { unlink_file "$ss" "$ss_src"; drop_tool starship; }
 
 # ----------------------------------------------------------------- fzf ---
 # Every toolkit picker runs on fzf. A current release in ~/.local/bin (ahead of
@@ -1228,6 +1232,116 @@ uninstall_app_keys() {
     ok "GNOME's own Super+1..9 back"
   fi
 }
+
+# ----------------------------------------------- what the tools run on ---
+# okta-aws-cli and the AWS CLI (okcli), kubectl (kx), direnv (okcli pin), starship
+# (the prompt): the newest release for this CPU, in ~/.local (no sudo). One that's
+# already installed some other way (apt, brew, by hand) counts and is left alone.
+# ver_of <program>: its version number
+ver_of() {
+  case "${1##*/}" in
+    kubectl) "$1" version --client ;;
+    direnv)  "$1" version ;;
+    *)       "$1" --version ;;
+  esac 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1
+}
+# tool_state <command>: installed (with version, and where when it isn't ours) or missing
+tool_state() {
+  local p; p=$(command -v "$1"); NOTE=""
+  [[ -n $p ]] || { STATE=missing; return; }
+  STATE=installed; NOTE=$(ver_of "$p")
+  [[ $p == "$HOME/.local/bin/$1" ]] || NOTE+=" (${p/#$HOME/\~})"
+}
+# get_tool <command> "<what it's for>" "<size>" <fetch function>
+get_tool() {
+  local p; p=$(command -v "$1")
+  [[ -n $p ]] && { ok "$1 $(ver_of "$p") is already installed"; return; }
+  [[ $OS_KIND == linux && -n $(dl_arch) ]] || { skip "no download for this machine; install $1 yourself"; return; }
+  ask "Download the latest $1 into ~/.local/bin? ($2; $3, no sudo)" || { skip; return; }
+  "$4" && ok "$1 $(ver_of "$HOME/.local/bin/$1")" || fail "not installed (see the log)"
+}
+# drop_tool <command>: removes ours from ~/.local/bin; one installed another way stays
+drop_tool() {
+  if [[ -e "$HOME/.local/bin/$1" ]]; then rm -f "$HOME/.local/bin/$1"; ok "removed $1"
+  elif command -v "$1" >/dev/null; then ok "$1 wasn't installed by the toolkit ($(command -v "$1")), so it stays"
+  else ok "not installed"; fi
+}
+# gh_tool <owner/repo> <asset> <command>: newest release asset (a tar.gz holding <command>, or the program itself) into ~/.local/bin
+gh_tool() {
+  local tmp rc=1
+  gh_latest "$1" "$2" || { warn "couldn't find the latest $3 (offline?)"; return 1; }
+  tmp=$(mktemp -d)
+  if fetch_checked "$GH_URL" "$GH_SHA" "$tmp/dl"; then
+    if [[ $2 == *.tar.gz ]]; then tar xzf "$tmp/dl" -C "$tmp" "$3" 2>>"$log_file" && mv "$tmp/$3" "$tmp/dl"; fi &&
+      mkdir -p "$HOME/.local/bin" && install -m 755 "$tmp/dl" "$HOME/.local/bin/$3" && rc=0
+  fi
+  rm -rf "$tmp"
+  (( rc )) || logf "$3 $GH_VER installed to ~/.local/bin"
+  return "$rc"
+}
+
+label_okta_aws_cli() { echo "okta-aws-cli"; }
+title_okta_aws_cli() { echo "okta-aws-cli, so okcli can sign you in to AWS through Okta"; }
+detail_okta_aws_cli() { echo "latest okta-aws-cli from GitHub (sha256-checked) in ~/.local/bin"; }
+state_okta_aws_cli() { tool_state okta-aws-cli; }
+install_okta_aws_cli() { get_tool okta-aws-cli "okcli signs in to AWS with it" "about 10 MB" fetch_okta_aws_cli; }
+fetch_okta_aws_cli() { gh_tool okta/okta-aws-cli "okta-aws-cli_{v}_linux_$(dl_arch).tar.gz" okta-aws-cli; }
+uninstall_okta_aws_cli() { drop_tool okta-aws-cli; }
+
+# AWS's own installer, into ~/.local/aws-cli with aws and aws_completer in ~/.local/bin.
+# AWS publishes no checksum for it (only a PGP signature); it comes over HTTPS from AWS.
+awscli_dir="$HOME/.local/aws-cli"
+label_aws_cli() { echo "AWS CLI v2"; }
+title_aws_cli() { echo "The aws command: okcli whoami, kx's EKS sign-in and kx sync need it"; }
+detail_aws_cli() { echo "latest AWS CLI v2 from awscli.amazonaws.com in ${awscli_dir/#$HOME/\~}, aws and aws_completer in ~/.local/bin"; }
+state_aws_cli() { tool_state aws; }
+install_aws_cli() {
+  command -v aws >/dev/null || command -v unzip >/dev/null || { skip "unzip is needed to unpack it (sudo apt install unzip)"; return; }
+  get_tool aws "okcli and kx's EKS sign-in use it" "about 60 MB" fetch_aws_cli
+}
+fetch_aws_cli() {
+  local arch tmp rc=1
+  case "$(dl_arch)" in amd64) arch=x86_64 ;; arm64) arch=aarch64 ;; esac
+  tmp=$(mktemp -d)
+  if curl -fsSL --retry 2 -o "$tmp/aws.zip" "https://awscli.amazonaws.com/awscli-exe-linux-$arch.zip" 2>>"$log_file"; then
+    unzip -q "$tmp/aws.zip" -d "$tmp" 2>>"$log_file" &&
+      "$tmp/aws/install" -i "$awscli_dir" -b "$HOME/.local/bin" --update >>"$log_file" 2>&1 && rc=0
+  else warn "couldn't download the AWS CLI (offline?)"; fi
+  rm -rf "$tmp"
+  return "$rc"
+}
+uninstall_aws_cli() {
+  if [[ -d $awscli_dir ]]; then
+    rm -rf "$awscli_dir" "$HOME/.local/bin/aws" "$HOME/.local/bin/aws_completer"; ok "removed the AWS CLI"
+  else drop_tool aws; fi
+}
+
+label_kubectl() { echo "kubectl"; }
+title_kubectl() { echo "kubectl, which kx runs on"; }
+detail_kubectl() { echo "latest stable kubectl from dl.k8s.io (sha256-checked) in ~/.local/bin"; }
+state_kubectl() { tool_state kubectl; }
+install_kubectl() { get_tool kubectl "kx runs on it" "about 60 MB" fetch_kubectl; }
+fetch_kubectl() {
+  local v url sum tmp rc=1
+  v=$(curl -fsS -m 10 https://dl.k8s.io/release/stable.txt 2>>"$log_file") || { warn "couldn't find the latest kubectl (offline?)"; return 1; }
+  url="https://dl.k8s.io/release/$v/bin/linux/$(dl_arch)/kubectl"
+  sum=$(curl -fsS -m 10 "$url.sha256" 2>>"$log_file") || { warn "couldn't get kubectl's checksum"; return 1; }
+  tmp=$(mktemp -d)
+  fetch_checked "$url" "$sum" "$tmp/kubectl" && mkdir -p "$HOME/.local/bin" &&
+    install -m 755 "$tmp/kubectl" "$HOME/.local/bin/kubectl" && rc=0
+  rm -rf "$tmp"
+  (( rc )) || logf "kubectl $v installed to ~/.local/bin"
+  return "$rc"
+}
+uninstall_kubectl() { drop_tool kubectl; }
+
+label_direnv() { echo "direnv"; }
+title_direnv() { echo "direnv, so okcli pin switches the AWS profile when you cd into a folder"; }
+detail_direnv() { echo "latest direnv from GitHub (sha256-checked) in ~/.local/bin; the toolkit's shell setup hooks it in"; }
+state_direnv() { tool_state direnv; }
+install_direnv() { get_tool direnv "okcli pin needs it" "about 10 MB" fetch_direnv; }
+fetch_direnv() { gh_tool direnv/direnv "direnv.linux-$(dl_arch)" direnv; }
+uninstall_direnv() { drop_tool direnv; }
 
 # -------------------------------------------------------- eks-clusters ---
 # Runs kx sync: tick the AWS accounts to search, then the clusters to add.

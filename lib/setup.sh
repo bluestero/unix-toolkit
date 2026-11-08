@@ -171,6 +171,34 @@ fetch_yazi() {
   logf "yazi $YAZI_VERSION installed to ~/.local/bin"
 }
 
+# ------------------------------------------------- latest downloads ---
+# The tools okcli, kx and the prompt run on (okta-aws-cli, kubectl, direnv,
+# starship) come as the newest release for this CPU, into ~/.local/bin (no sudo).
+# dl_arch: amd64 | arm64 (nothing on other CPUs)
+dl_arch() { case "$(uname -m)" in x86_64|amd64) echo amd64 ;; aarch64|arm64) echo arm64 ;; esac; }
+# gh_latest <owner/repo> <asset name, {v} = version>: sets GH_VER GH_URL GH_SHA
+# from the newest GitHub release (GH_SHA = GitHub's sha256 of the asset). 1 = offline / no such asset.
+gh_latest() {
+  local out
+  GH_VER="" GH_URL="" GH_SHA=""
+  out=$(curl -fsS -m 10 "https://api.github.com/repos/$1/releases/latest" 2>>"$log_file" |
+    python3 -Ic '
+import json, sys
+r = json.load(sys.stdin); v = r["tag_name"].lstrip("v"); want = sys.argv[1].replace("{v}", v)
+for a in r["assets"]:
+    if a["name"] == want and a.get("digest", "").startswith("sha256:"):
+        print(v, a["browser_download_url"], a["digest"][7:])
+' "$2" 2>>"$log_file") || return 1
+  read -r GH_VER GH_URL GH_SHA <<<"$out"
+  [[ -n $GH_URL ]]
+}
+# fetch_checked <url> <sha256> <file>: downloads it, keeps it only when the sha256 matches
+fetch_checked() {
+  curl -fsSL --retry 2 -o "$3" "$1" 2>>"$log_file" || { warn "couldn't download ${1##*/} (offline?)"; return 1; }
+  [[ "$(sha256sum "$3" | cut -d' ' -f1)" == "$2" ]] && return 0
+  warn "${1##*/} didn't match its checksum, so it wasn't installed"; rm -f "$3"; return 1
+}
+
 # --------------------------------------------------------------- files ---
 
 # ------------------------------------------------------------ originals ---

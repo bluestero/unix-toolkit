@@ -23,16 +23,11 @@ Every command speaks the same words: `<tool>` picker, `<tool> <name>` switch, `l
 
 For Ubuntu with GNOME. About 10 minutes; nothing changes without asking first. On other systems (Arch, KDE, macOS) the installer checks each part against the machine and marks what can't run there `⊘ not supported here`, with the reason (needs GNOME, needs apt, Linux only for now); those are left out of the checklist.
 
-**1. Install what the tools run on.** The installer sets up the toolkit itself, kitty and zsh,
-but not these. Install the ones for the tools you'll use:
-
-| You want | Install |
-|---|---|
-| everything | `sudo apt install git curl fzf direnv` |
-| `okcli` (AWS) | [okta-aws-cli](https://github.com/okta/okta-aws-cli) v2 and the [AWS CLI v2](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) |
-| `kx` (Kubernetes) | [kubectl](https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/) (plus the AWS CLI for EKS) |
-| `twin` | the [Twingate client](https://www.twingate.com/download) |
-| the prompt | [starship](https://starship.rs) |
+**1. Have git and curl.** The one command below needs them (`sudo apt install git curl`).
+Everything the tools run on comes with the installer, the latest release for your CPU, in
+`~/.local` with no sudo: fzf, starship, direnv, okta-aws-cli and the AWS CLI v2 (okcli),
+kubectl (kx). One you already have is used as it is. The one thing to install yourself is the
+[Twingate client](https://www.twingate.com/download), for `twin`.
 
 **2. Get it.** One command: it clones the toolkit into `~/.local/share/unix-toolkit` (or updates
 it if it's there) and adds the `tk` command. Nothing else changes yet.
@@ -159,9 +154,10 @@ The first time the installer changes something of yours, it keeps what you had i
 | `bash` | `~/.bashrc` keeps the Ubuntu defaults plus one line loading `shell/init.sh`; PATH, nvm, direnv/starship hooks and exact copies of the toolkit's aliases move into the repo, clashing leftovers (ble.sh, old okcli hooks, duplicate nvm) are removed. Your own aliases stay. Uninstall puts the removed lines back |
 | `btop` | installs btop (apt) if missing, links `~/.config/btop/btop.conf` → `btop/btop.conf`, and has k-theme write btop's colours from your kitty theme (re-done on every theme change). Uninstall puts your own btop config back |
 | `yazi` | yazi 26.9.1 (terminal file manager) from GitHub in `~/.local/bin`, checked against a pinned sha256; also `ya`. The `y` command (`yazi/shell/y.sh`, loaded by `shell/init.sh`) opens it and leaves your shell in the folder you quit in (`q`; `Q` quits without cd). Colours follow the kitty theme through the terminal palette. Uninstall removes the binaries; `~/.config/yazi` stays |
+| `direnv` | latest direnv from GitHub (sha256-checked) in `~/.local/bin`, for `okcli pin`; the shell setup hooks it in. Skipped if you already have one; uninstall only removes the toolkit's |
 | `keys` | `~/.inputrc` → `shell/inputrc` (case-insensitive Tab, Up/Down search by what's typed) |
 | `commands` | `okcli`, `kx`, `twin`, `ctx`, `ws` in `~/.local/bin` |
-| `starship` | `~/.config/starship.toml` → `starship/starship.toml` |
+| `starship` | `~/.config/starship.toml` → `starship/starship.toml`, and starship itself (latest from GitHub, sha256-checked) in `~/.local/bin` if it isn't installed |
 | `fzf` | fzf 0.74.5 from GitHub (checksum-checked) in `~/.local/bin`, ahead of Ubuntu's 0.44. Every picker then shows where you are (`12/426`, `3/17 of 426` while searching), and k-theme gets its tabs. Uninstall goes back to apt's |
 | `kitty` | the kitty terminal itself: the latest official build (checksum-checked) in `~/.local/kitty.app`; `kitty`/`kitten` in `~/.local/bin`, the app menu entry and Ctrl+Alt+T point at it. Ubuntu's apt kitty stays as the fallback (uninstall goes back to it). `./install.sh ls` shows when there's a newer one |
 | `kitty-config` | `~/.config/kitty/kitty.conf` → `kitty/kitty.conf` |
@@ -185,6 +181,9 @@ The first time the installer changes something of yours, it keeps what you had i
 | `vitals-icons` | Two SVGs in `gnome/vitals-icons` (CPU chip with a solid core, RAM chip with pins) copied over the Vitals extension's `icons/original` icons, and its dropdown is centred under the pill (`menu-centered`, old value put back on uninstall); stock ones kept as `*.toolkit-orig` for the uninstall. An extension update restores the stock icons, so run it again after one |
 | `rofi` | apt `rofi`; `~/.config/rofi/config.rasi` → `rofi/config.rasi` (minimal; `colors.rasi` is written by `kitty/bin/k-rofi` from the kitty colours in use, and `k-theme` / `k-bg` re-run it on every change); GNOME shortcuts Alt+Space (open windows first, then apps; pick a window to focus it), Alt+Shift+Space (ssh), Super+S (speaker, mic, wifi, bluetooth: pick a row to switch; Ctrl+Tab / Ctrl+Shift+Tab cycle the four; a new secured wifi network asks for its password in the list) and Super+X (power: lock, suspend, hibernate, log out, restart, shut down; the last three ask first). Inside: Tab / Ctrl+Tab switches between apps, ssh, files and power; Esc closes. The shortcuts use `-normal-window` so it gets the keyboard on Wayland |
 | `no-animations` | GNOME setting `org.gnome.desktop.interface enable-animations = false`: no window zoom animations (snappier, and no blurry flash when the rofi launcher opens and closes fast); asked with default No, old value put back on uninstall |
+| `okta-aws-cli` | latest okta-aws-cli from GitHub (sha256-checked) in `~/.local/bin`, for `okcli`. Skipped if you already have one |
+| `aws-cli` | latest AWS CLI v2 from AWS (its own installer) in `~/.local/aws-cli`, `aws` in `~/.local/bin`, for `okcli whoami` and kx's EKS sign-in. Needs unzip |
+| `kubectl` | latest stable kubectl from dl.k8s.io (sha256-checked) in `~/.local/bin`, for `kx` |
 | `eks-clusters` | Runs `kx sync` (after `okcli sync`): tick the AWS accounts, then the EKS clusters you want. Unticked ones go in `~/.config/kx/ignore`. Skipped if you already have contexts. |
 | `repos` | Checks `ssh -T git@github.com`, then clones the repos in your workspace list that are missing: your layers' shared lists plus your own (checklist, all ticked). Creates your list (`~/.config/ws/workspaces`) if needed. Never deletes clones. |
 | `claude-skill` | Links `claude/skills/work-toolkit` (and each layer's skills) into Claude Code's skills (`$CLAUDE_CONFIG_DIR`, else `~/.claude`), so Claude knows okcli, kx, ctx and the rest in every repo: run AWS and kubectl through `okcli exec` / `kx exec` / `direnv exec`, and ask before prod changes or defaults |

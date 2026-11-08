@@ -31,7 +31,7 @@ REGIONS="${KX_REGIONS:-us-east-1}"
 ALIAS_RULES="${KX_ALIAS_RULES:-eks-=}"
 S=$'\x1f'
 
-command -v kubectl >/dev/null || die "kubectl is not installed."
+command -v kubectl >/dev/null || die "kubectl is not installed: tk install kubectl"
 
 # ---------------------------------------------------------------- reading ---
 
@@ -647,7 +647,7 @@ cmd_unignore() {
 cmd_sync() {
   local yes=0
   [[ "${1:-}" == "--yes" || "${1:-}" == "-y" ]] && { yes=1; shift; }
-  command -v aws >/dev/null || die "The aws CLI is not installed."
+  command -v aws >/dev/null || die "The aws CLI is not installed: tk install aws-cli"
   local interactive=0
   (( yes == 0 )) && [[ -t 0 && -t 1 ]] && command -v fzf >/dev/null && interactive=1
   local ign; ign=$(ignored)
@@ -811,9 +811,9 @@ cmd_exec() {
 cmd_doctor() {
   local bad=0
   check() { if eval "$2" >/dev/null 2>&1; then ok "$1"; else warn "$1 — $3"; bad=1; fi; }
-  check "kubectl installed" "command -v kubectl" "install kubectl"
-  check "fzf installed" "command -v fzf" "needed for the pickers"
-  check "aws CLI installed" "command -v aws" "needed for EKS auth and 'kx sync'"
+  check "kubectl installed" "command -v kubectl" "tk install kubectl"
+  check "fzf installed" "command -v fzf" "needed for the pickers (tk install fzf)"
+  check "aws CLI installed" "command -v aws" "needed for EKS auth and 'kx sync' (tk install aws-cli)"
   check "okcli available" "command -v okcli" "optional: links contexts to AWS profiles"
   check "shell hook loaded" "[[ -n \"\${KX_SHELL_FILE:-}\" ]]" "tk install bash"
   check "base kubeconfig ($BASE_FILE)" "[[ -r \"$BASE_FILE\" ]]" "run 'kx sync <profile>'"

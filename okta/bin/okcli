@@ -344,7 +344,7 @@ open_url() {
 # the rest reuse the cached Okta access token.
 refresh_profiles() {
   local names=("$@") name row idp role out failed=0 first=1
-  command -v okta-aws-cli >/dev/null || die "okta-aws-cli is not installed."
+  command -v okta-aws-cli >/dev/null || die "okta-aws-cli is not installed: tk install okta-aws-cli"
   for name in "${names[@]}"; do
     row=$(profile_row "$name") || { warn "Skipping unknown profile '$name'."; failed=1; continue; }
     IFS=$'\t' read -r _ _ _ _ idp role <<<"$row"
@@ -475,7 +475,7 @@ fetch_all() {
   tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/okcli-all.XXXXXX") || die "Cannot create a temp file."
   # Tests: use a prepared credentials file instead of signing in.
   if [[ -n "${OKCLI_TEST_FETCH:-}" ]]; then cp "$OKCLI_TEST_FETCH" "$tmp"; printf '%s\n' "$tmp"; return; fi
-  command -v okta-aws-cli >/dev/null || die "okta-aws-cli is not installed."
+  command -v okta-aws-cli >/dev/null || die "okta-aws-cli is not installed: tk install okta-aws-cli"
   idp=$(profiles_tsv | cut -f5 | grep -m1 . || true)
   args=(web --all-profiles --format aws-credentials --write-aws-credentials --aws-credentials "$tmp"
     --expiry-aws-variables --cache-access-token)
@@ -499,7 +499,7 @@ identify_sections() {
     grep -q "^$s"$'\t' "$SOURCES_FILE" || unknown+=("$s")
   done < <(ini_sections "$file")
   if (( ${#unknown[@]} )); then
-    command -v aws >/dev/null || die "The aws CLI is needed to identify roles."
+    command -v aws >/dev/null || die "The aws CLI is needed to identify roles: tk install aws-cli"
     info "${C_DIM}Identifying ${#unknown[@]} role(s)...${C_RESET}"
     printf '%s\n' "${unknown[@]}" |
       AWS_SHARED_CREDENTIALS_FILE="$file" AWS_CONFIG_FILE=/dev/null AWS_REGION=us-east-1 \
@@ -673,7 +673,7 @@ bulk_refresh() {
 cmd_whoami() {
   local name="${1:-${AWS_PROFILE:-}}"
   [[ -n "$name" ]] || die "No active profile. Pick one with 'okcli'."
-  command -v aws >/dev/null || die "The aws CLI is not installed."
+  command -v aws >/dev/null || die "The aws CLI is not installed: tk install aws-cli"
   info "${C_DIM}profile: $name${C_RESET}"
   AWS_PROFILE="$name" aws sts get-caller-identity --output table
 }
@@ -714,7 +714,7 @@ cmd_pin() {
     direnv allow "$dir"
     info "  It loads whenever you cd into this folder."
   else
-    warn "direnv is not installed, so the pin won't load automatically. See 'okcli help setup'."
+    warn "direnv is not installed, so the pin won't load automatically: tk install direnv"
   fi
   if git -C "$dir" rev-parse >/dev/null 2>&1 && ! git -C "$dir" check-ignore -q .envrc; then
     info "${C_DIM}  Tip: .envrc is not git-ignored. Commit it to share the pin, or add it to .gitignore.${C_RESET}"
@@ -854,10 +854,10 @@ cmd_edit() {
 cmd_doctor() {
   local bad=0 v
   check() { if eval "$2" >/dev/null 2>&1; then ok "$1"; else warn "$1 — $3"; bad=1; fi; }
-  check "okta-aws-cli installed" "command -v okta-aws-cli" "install it from github.com/okta/okta-aws-cli"
-  check "aws CLI installed" "command -v aws" "needed for 'okcli whoami'"
-  check "fzf installed" "command -v fzf" "needed for the interactive picker (apt install fzf)"
-  check "direnv installed" "command -v direnv" "needed for 'okcli pin' (apt install direnv)"
+  check "okta-aws-cli installed" "command -v okta-aws-cli" "tk install okta-aws-cli"
+  check "aws CLI installed" "command -v aws" "needed for 'okcli whoami' (tk install aws-cli)"
+  check "fzf installed" "command -v fzf" "needed for the interactive picker (tk install fzf)"
+  check "direnv installed" "command -v direnv" "needed for 'okcli pin' (tk install direnv)"
   check "shell wrapper loaded" "[[ -n \"\${OKCLI_SHELL:-}\" ]]" "tk install bash"
   for v in OKTA_AWSCLI_ORG_DOMAIN OKTA_AWSCLI_OIDC_CLIENT_ID; do
     check "$v set" "[[ -n \"\${$v:-}\" ]]" "export it in your shell rc (ask the team for the value)"
