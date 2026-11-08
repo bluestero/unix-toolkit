@@ -116,9 +116,10 @@ if (( quick )); then
   for id in "${todo[@]}"; do "$(fn install "$id")"; done
   exit 0
 fi
-# A full setup in a terminal opens on the tabs (fzf 0.63+: its footer); else the checklist below.
+# A full setup in a terminal opens on the tabs (fzf 0.63+: its footer), even with everything
+# set up (to look through); else the table and the checklist below.
 tabs=0
-[[ "$mode" == ask && $named == 0 && $list == 0 && ${#todo[@]} -gt 0 && -t 1 ]] && ui_fzf_at_least 0.63 && tabs=1
+[[ "$mode" == ask && $named == 0 && $list == 0 && -t 1 ]] && ui_fzf_at_least 0.63 && tabs=1
 printf '%s' "$table" | print_table 3 | sed 's/\x1b\[[0-9;]*m//g' >>"$log_file"
 if (( ! tabs )); then
   say ""
@@ -130,14 +131,16 @@ if (( ! tabs )); then
   (( list )) && exit 0
   say ""
 fi
-if (( ${#todo[@]} == 0 )); then
+if (( ${#todo[@]} == 0 && ! tabs )); then
   if (( skipped == ${#wanted[@]} )); then say "None of these can run on this machine. Nothing to do."
   else say "Everything is already set up. Nothing to do."; fi
   exit 0
 fi
 
 if (( tabs )); then
+  had=${#todo[@]}
   tabs_pick || { say "Cancelled. Nothing changed."; exit 0; }
+  (( had )) || { say "Everything is already set up. Nothing to do."; exit 0; }
   (( ${#todo[@]} )) || { say "Nothing picked. Nothing changed."; exit 0; }
   logf "picked: ${todo[*]}"
 fi

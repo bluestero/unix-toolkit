@@ -93,7 +93,9 @@ t_rows() {
         t_on "$I_ID" || continue
         printf '%s\x1f%s\t%s\n' "$C_GREEN✓$C_RESET $I_ID" "$C_DIM$I_TITLE$C_RESET" "$I_ID"; n=$((n + 1))
       done <"$T/info"
-      (( n )) || printf '%s\x1f\t\n' "${C_DIM}Nothing ticked: ← to go back and tick, esc to leave$C_RESET"
+      if (( ! n )) && ! grep -q $'\x1e1\x1e' "$T/info"; then
+        printf '%s\x1f\t\n' "${C_GREEN}✓$C_RESET ${C_DIM}Everything here is set up. esc to leave$C_RESET"
+      elif (( ! n )); then printf '%s\x1f\t\n' "${C_DIM}Nothing ticked: ← to go back and tick, esc to leave$C_RESET"; fi
     fi
   } | print_table 3 "$(ui_pick_width)"
 }
@@ -103,7 +105,10 @@ t_rows() {
 t_strip() {
   local -a labels=("${TABS[@]}") row=()
   local w=$(( ${FZF_COLUMNS:-$(ui_cols)} - 6 )) used=1 i first=0 l out=""
-  labels+=("Summary $(grep -c '' "$T/on")")
+  local n; n=$(grep -c '' "$T/on")
+  if (( n )); then labels+=("Summary · $n to set up")
+  elif grep -q $'\x1e1\x1e' "$T/info"; then labels+=("Summary · nothing ticked")
+  else labels+=("Summary · all set"); fi
   for i in "${!labels[@]}"; do
     l=${#labels[i]}
     if (( ${#row[@]} && used + l + 3 > w )); then

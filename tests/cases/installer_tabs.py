@@ -54,9 +54,9 @@ def test_esc_changes_nothing(sb):
 
 def test_tick_follows_to_the_summary(sb):
     _, t = start(sb)
-    n = int(re.search(r"Summary (\d+)", t.text()).group(1))
+    n = int(re.search(r"Summary · (\d+) to set up", t.text()).group(1))
     t.key("space")                                        # bash, the first row: unticked
-    t.wait_for(f"Summary {n - 1}")
+    t.wait_for(f"Summary · {n - 1} to set up")
     t.key("enter")
     t.wait_for("✓ keys ")
     t.settle()
@@ -117,3 +117,21 @@ def test_enter_on_the_summary_sets_up_the_ticked(sb):
     t.key("enter")
     t.wait_for("[Y/n, default: yes]")                     # the run has started: its first question
     t.close()
+
+
+def test_all_set_still_opens_the_tabs(sb):
+    repo = copy(sb)
+    os.makedirs(repo + "/layers/demo")
+    with open(repo + "/layers/demo/components.sh", "w") as f:
+        f.write('COMPONENTS+=(demo-part)\ngroup_demo_part() { echo Demo; }\n'
+                'label_demo_part() { echo Demo; }; title_demo_part() { echo "a part that is in"; }\n'
+                'detail_demo_part() { echo nothing; }; state_demo_part() { STATE=installed NOTE=""; }\n'
+                'install_demo_part() { ok "already there"; }; uninstall_demo_part() { :; }\n')
+    t = Term([repo + "/install.sh", "--layer=demo"], sb.env, cols=120, rows=34, cwd=sb.home)
+    t.wait_for("Summary · all set", timeout=20)
+    t.wait_for("demo-part")
+    t.key("enter")
+    t.wait_for("Everything here is set up")
+    t.key("enter")
+    assert t.wait_exit() == 0
+    assert "Everything is already set up" in t.text()
