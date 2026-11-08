@@ -15,6 +15,8 @@
 #   ip_reask "<why it failed>"                the same question again, the reason on top
 #                                             in red, the typed text kept to fix
 #   ip_answer <key>                           in confirm mode: yes / no / "" (not an answer)
+# In a sortable picker (ui_fzf --sortable) the question's header goes through
+# ui_sort_header, so the column titles stay under it.
 # A question's actions bind y and n; the list's start should unbind them
 # (--bind start:unbind\(y,n\)) and its way back rebind nothing: ip_back does that part.
 
@@ -40,13 +42,13 @@ ip_confirm() {   # question pending [default y|n]
   [[ $(ip_get mode) == ask ]] && clear="$(ip_fz change-query "")+enable-search"
   ip_set mode confirm; ip_set pending "$2"; ip_set question "$1"; ip_set default "$d"
   if [[ $d == y ]]; then keys="y: yes (enter too) · n: no (esc too)"; else keys="y: yes · n: no (enter, esc too)"; fi
-  ip_join "$(ip_fz change-header "$(ip_header "$1" "$keys")")" \
+  ip_join "$(ip_fz change-header "$(ui_sort_header "$(ip_header "$1" "$keys")")")" \
     "$(ip_fz change-prompt "${C_YELLOW}y / n? ${C_RESET}")" "rebind(y,n)" "$(ip_fz change-footer " ")" ${clear:+"$clear"}
 }
 
 ip_ask() {   # question pending [prefill] [prompt]
   ip_set mode ask; ip_set pending "$2"; ip_set question "$1"
-  ip_join "$(ip_fz change-header "$(ip_header "$1" "enter: ok · esc: cancel")")" \
+  ip_join "$(ip_fz change-header "$(ui_sort_header "$(ip_header "$1" "enter: ok · esc: cancel")")")" \
     "$(ip_fz change-prompt "${C_YELLOW}${4:-> }${C_RESET}")" disable-search "unbind(y,n)" \
     "$(ip_fz change-query "${3:-}")" "$(ip_fz change-footer " ")"
 }
@@ -54,7 +56,7 @@ ip_ask() {   # question pending [prefill] [prompt]
 ip_reask() {   # why the answer didn't work
   local keys="enter: ok · esc: cancel"
   [[ $(ip_get mode) == confirm ]] && keys="y: yes · n: no (enter, esc too)"
-  ip_fz change-header "$(ip_header "$(ip_get question)" "$keys" "${C_RED}✗ $1${C_RESET}")"
+  ip_fz change-header "$(ui_sort_header "$(ip_header "$(ip_get question)" "$keys" "${C_RED}✗ $1${C_RESET}")")"
 }
 
 ip_answer() {   # key → yes / no / nothing

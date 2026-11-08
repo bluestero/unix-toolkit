@@ -14,6 +14,8 @@ ROOT="$(cd "$(dirname "$SELF")/../.." && pwd)"
 . "$ROOT/lib/workspaces.sh"
 # shellcheck source=../../lib/hat.sh
 . "$ROOT/lib/hat.sh"
+# shellcheck source=../../lib/inplace.sh
+. "$ROOT/lib/inplace.sh"
 
 CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/ws"
 IDE_CONF="$CONF_DIR/ide"
@@ -234,59 +236,91 @@ ide_default() {
 }
 
 # --------------------------------------------------------------- picker ---
-# Picker rows for one IDE: a header line, then workspaces. Column 1 (hidden) is the plain name.
-picker_rows() {
-  local ide="$1" i n=0 act=0 tabs name path
+# The IDE tabs (←→ to change), the active one lit.
+ide_tabs() {
+  local ide="$1" i n=0 act=0
   local -a labels=()
   for i in $(installed_ides); do
     [[ $i == "$ide" ]] && act=$n
     labels+=("$(ide_field "$i" 4)"); n=$((n + 1))
   done
-  # the header line: the IDE tabs (←→ to change) with the keys you can't guess
-  tabs=$(ui_tabs "$act" "${labels[@]}")
-  printf '\t%s\n' "$tabs     ${C_KEY}←→${C_RESET} ${C_WORD}IDE${C_RESET}   ${C_KEY}tab${C_RESET} ${C_WORD}tick${C_RESET}   ${C_KEY}ctrl-x${C_RESET} ${C_WORD}close${C_RESET}"
+  ui_tabs "$act" "${labels[@]}"
+}
+
+# The header over the table: the IDE tabs and what the marks mean on one row, then the picker's keys (ui_fzf keeps them
+# in $UI_SORT_DIR/keys), the divider and the title row.
+picker_header() {   # state file
+  ui_sort_keys "$(<"$UI_SORT_DIR/keys")" "$(ide_tabs "$(<"$1")")   $(ui_mark_here) ${C_DIM}open · ↑ parent folder · ⇄ in the repo · – default${C_RESET}"
+}
+
+# Picker rows for one IDE: the title row, then the workspaces with their hat.
+# Column 1 (hidden) is the plain name.
+picker_rows() {
+  local ide="$1" b=$C_BOLD r=$C_RESET row
   OPEN=$(open_names "$ide")
-  # rows: just the name, ● and green when open (paths: ws ls)
-  while IFS="$T" read -r name path; do
-    [[ -n $name ]] || continue
-    if is_open "$name"; then printf '%s\t%s\n' "$name" "$(ui_mark_here) $C_GREEN$C_BOLD$name$C_RESET"
-    else printf '%s\t%s\n' "$name" "  $name"; fi
-  done <<<"$ENTRIES"
+  printf '\t%s\n' "  ${b}WORKSPACE${r}$S${b}FOLDER${r}$S${b}CLAUDE${r}$S${b}GITHUB${r}$S${b}AWS${r}"
+  rows | while IFS= read -r row; do printf '%s\t%s\n' "${row%%"$S"*}" "${row#*"$S"}"; done
+}
+
+# The picker's keys while Window Calls is missing: ctrl-x asks (lib/inplace.sh).
+wc_key() {   # key query state
+  local header; header=$(picker_header "$3")
+  if [[ $(ip_get mode) == confirm ]]; then
+    local a; a=$(ip_answer "$1"); [[ -n $a ]] || return 0
+    if [[ $a == yes ]]; then touch "$IP/need-wc"; echo abort; return; fi
+    ip_join "$(ip_back)" "$(ip_fz change-header "$header")" "$(ip_fz change-prompt 'workspace> ')"; return
+  fi
+  case $1 in
+    esc) echo abort ;;
+    ctrl-x) ip_set saved_q "$2"; ip_confirm "Closing windows needs the GNOME extension Window Calls. Install it now?" install y ;;
+  esac
 }
 
 # ←/→ in the picker: step through installed IDEs, remembered in a temp file.
-cycle() {
+ide_step() {
   local f="$1" step="$2" cur list n i
   cur=$(<"$f"); mapfile -t list < <(installed_ides); n=${#list[@]}
   for i in "${!list[@]}"; do [[ ${list[$i]} == "$cur" ]] && break; done
   [[ ${list[$i]:-} == "$cur" ]] || i=0
   cur=${list[$(( (i + step + n) % n ))]}
   echo "$cur" >"$f"
-  picker_rows "$cur"
 }
+cycle() { ide_step "$1" "$2"; picker_rows "$(<"$1")"; }
+# ←/→: the new IDE's rows and its tabs in the header
+ide_key() { ide_step "$1" "$2"; ip_join "reload('$SELF' __cycle '$1' 0)" "$(ui_fz change-header "$(picker_header "$1")")"; }
+# alt-h: the hat panel on that workspace's folder
+hat_jump() { local e; e=$(find_entry "$1"); [[ -n $e ]] && "$ROOT/bin/hat" set "${e#*"$T"}"; return 0; }
 
 picker() {
   command -v fzf >/dev/null || { ws_ls; echo; info "Install fzf for the picker, or: ws open <name>"; return 0; }
   local ide picked state
-  state=$(mktemp); PICKER_STATE=$state; trap 'rm -f "${PICKER_STATE:-}" "${PICKER_STATE:-}.need-wc"' EXIT
+  state=$(mktemp); PICKER_STATE=$state; IP=$(mktemp -d); export IP
+  trap 'rm -rf "${PICKER_STATE:-}" "${IP:-}"' EXIT
   ide=$(default_ide); ide_installed "$ide" || ide=$(installed_ides | head -1)
   [[ -n "$ide" ]] || die "No supported IDE installed · see: ws default"
   echo "$ide" >"$state"
-  # ctrl-x closes the window. Without Window Calls it leaves fzf first (so the
-  # terminal is back to normal) and then offers to install it.
+  # ctrl-x closes the window. Without Window Calls it asks, in the list's header,
+  # whether to install it; only yes leaves the list (the installer is its own screen).
   local close_bind="ctrl-x:execute-silent('$SELF' __close '$state' {+1})+reload('$SELF' __cycle '$state' 0)"
-  wc_ok || close_bind="ctrl-x:execute-silent(touch '$state.need-wc')+abort"
+  local -a wcbinds=()
+  if ! wc_ok; then
+    ip_set mode list
+    wcbinds=(--bind "start:unbind(y,n)")
+    local k; for k in ctrl-x y n esc; do wcbinds+=(--bind "$k:transform:'$SELF' __wckey $k {q} '$state'"); done
+    close_bind=""
+  fi
   mapfile -t picked < <(
     picker_rows "$ide" |
-      ui_fzf "ws · workspaces" --multi --delimiter='\t' --with-nth=2 --header-lines=1 --prompt='workspace> ' \
-        --bind="$close_bind" \
-        --bind="right:reload('$SELF' __cycle '$state' 1)" \
-        --bind="left:reload('$SELF' __cycle '$state' -1)" |
+      ui_fzf "ws · workspaces" --sortable --multi --delimiter='\t' --with-nth=2 --header-lines=1 --prompt='workspace> ' \
+        --header='←→: IDE · tab: tick · alt-h: hat · ctrl-x: close · esc: quit' \
+        --with-shell='bash -c' ${close_bind:+--bind="$close_bind"} "${wcbinds[@]}" \
+        --bind="start:+transform:'$SELF' __tabs '$state'" \
+        --bind="alt-h:execute('$SELF' __hat {1})+reload('$SELF' __cycle '$state' 0)" \
+        --bind="right:transform:'$SELF' __ide '$state' 1" \
+        --bind="left:transform:'$SELF' __ide '$state' -1" |
       cut -f1
   )
-  if [[ -f "$state.need-wc" ]]; then
-    rm -f "$state.need-wc"
-    info "Closing windows from ws needs the GNOME extension Window Calls."
+  if [[ -e "$IP/need-wc" ]]; then
     "$ROOT/install.sh" window-calls
     # back to the picker once it works (Wayland only loads it after logging in again)
     wc_ok && { picker; return; }
@@ -308,7 +342,7 @@ ws_ls() {
 
 usage() {
   ui_help ws "workspaces in your IDE" <<'EOF'
-ws	picker	←→ IDE · tab tick · ctrl-x close
+ws	picker	←→ IDE · tab tick · alt-h hat of the folder · ctrl-x close
 ws <name>...	open these in the default IDE (focus them if already open)
 ws ls	every workspace, ● = open in the default IDE, and its hat	Claude, GitHub, AWS: hat
 ws close <name>...	close their windows	needs Window Calls: ./install.sh window-calls
@@ -341,7 +375,11 @@ case "${1:-}" in
   edit) cmd_edit ;;
   __names) cut -f1 <<<"$ENTRIES" ;;
   __ides) ide_ids ;;
-  __cycle) [[ -z "${NO_COLOR:-}" ]] && ui_color; cycle "$2" "$3" ;;
+  __cycle) [[ -z "${NO_COLOR:-}" ]] && ui_color; cycle "$2" "$3" | ui_sort_feed ;;
+  __ide) [[ -z "${NO_COLOR:-}" ]] && ui_color; ide_key "$2" "$3" ;;
+  __tabs) [[ -z "${NO_COLOR:-}" ]] && ui_color; ui_fz change-header "$(picker_header "$2")" ;;
+  __hat) hat_jump "$2" ;;
+  __wckey) [[ -z "${NO_COLOR:-}" ]] && ui_color; wc_key "$2" "${3:-}" "${4:-}" ;;
   __close) f="$2"; shift 2; close_many "$(<"$f")" "$@" >/dev/null 2>&1; sleep 0.4 ;;
   -*) ui_unknown ws "$1" ;;
   *)
