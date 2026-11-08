@@ -15,8 +15,8 @@ Every command speaks the same words: `<tool>` picker, `<tool> <name>` switch, `l
 | `ctx` | One screen: AWS profile, cluster/namespace, Twingate, defaults and repo pin. `ctx plain` gives the same as labelled lines (what Claude Code gets). |
 | `k-icon` | Kitty app icon: picker, `k-icon <name>`, `k-icon ls`. |
 | `k-config` | Edit `kitty/kitty.conf` (the file kitty reads through the link) in `$EDITOR` (else nano); warns if the link is missing. kitty reloads it by itself on save (0.47+). |
-| `k-bg` | Kitty background picker: the image previews live as you move through the list; ←/→ image brightness, shift+←/→ opacity (live); Enter keeps it, Esc puts the old one back. `k-bg <name>` / `k-bg off` / `k-bg bright 40` / `k-bg opacity 85` / `k-bg ls` / `k-bg status` / `k-bg accents on\|off`. Images live in `kitty/backgrounds/`. |
-| `k-theme` | Kitty colour theme picker with two tabs, ←/→ to switch: **Mine** (your short list, `~/.config/k-theme/mine`, everyone has their own; it always opens here) and **All** (every other theme: yours plus kitty's 400+). Colours preview live as you move; type to search. `ctrl-a` in All moves a theme to Mine, `ctrl-d` in Mine moves it back (Tab ticks several first). `ctrl-f` shows all → only dark → only light, in both tabs (your own themes are sorted by their background colour). Enter keeps the theme, Esc puts the old one back. Import a downloaded theme: drop the `.conf` in `~/.config/kitty/themes/` (or the team's `kitty/themes/`), or `k-theme add <file or URL> [name]`. `k-theme add <name>` / `rm <name>` / `<name>` / `default` / `ls [all]` / `status` / `update`. Only colour lines are taken from a theme, and k-bg accents still win for the cursor, selection and tabs. The tabs need fzf 0.60+ (`./install.sh fzf`); older fzf gets one list. |
+| `k-bg` | Kitty background picker: the image previews live as you move through the list; ←/→ image brightness, shift+←/→ opacity (live); Enter keeps it, Esc puts the old one back. `k-bg <name>` / `k-bg off` / `k-bg bright 40` / `k-bg opacity 85` / `k-bg ls` / `k-bg status` / `k-bg accents on\|off`. Images live in `feelkit/backgrounds/`. |
+| `k-theme` | Kitty colour theme picker with two tabs, ←/→ to switch: **Mine** (your short list, `~/.config/k-theme/mine`, everyone has their own; it always opens here) and **All** (every other theme: yours plus kitty's 400+). Colours preview live as you move; type to search. `ctrl-a` in All moves a theme to Mine, `ctrl-d` in Mine moves it back (Tab ticks several first). `ctrl-f` shows all → only dark → only light, in both tabs (your own themes are sorted by their background colour). Enter keeps the theme, Esc puts the old one back. Import a downloaded theme: drop the `.conf` in `~/.config/kitty/themes/` (or the team's `feelkit/themes/`), or `k-theme add <file or URL> [name]`. `k-theme add <name>` / `rm <name>` / `<name>` / `default` / `ls [all]` / `status` / `update`. Only colour lines are taken from a theme, and k-bg accents still win for the cursor, selection and tabs. The tabs need fzf 0.60+ (`./install.sh fzf`); older fzf gets one list. |
 | starship | `starship/starship.toml`: git, python, k8s context/namespace, AWS profile and expiry, loud **PROD** markers. |
 
 ## Set it up on your machine (teammates)
@@ -93,7 +93,7 @@ changing it: a company's settings, team repos and commands stay in a private rep
 toolkit stays general. `layers/` is gitignored; there's nothing to register.
 
 ```bash
-tk layer add git@github.com:acme/acme-toolkit.git   # clones into layers/acme (-toolkit dropped), offers to set it up
+tk layer add git@github.com:acme/acme-toolkit.git   # clones into layers/acme (a unix- prefix and -toolkit are dropped), offers to set it up
 tk layer ls                                          # what's there, where from, which version
 tk layer rm acme                                     # deletes it (refuses while it has unpushed work)
 ```
@@ -110,7 +110,22 @@ Copying a folder into `layers/` works too (no updates then). Everything in a lay
 | `claude/skills/<skill>/` | Claude Code skills, linked by the `claude-skill` component |
 | `claude/guidelines/` | Vendored coding guidelines, merged into `CLAUDE.md` by the `claude-guidelines` component |
 
-`lib/layers.sh` has the same list for whoever writes one.
+`lib/layers.sh` has the same list for whoever writes one. A layer's components can also say what
+they need from the machine (`requires_<id>`: `gnome`, `apt`, `linux`) and list themselves in
+`LOOK_PARTS+=(…)` to get the keep / re-apply / reset settings menu.
+
+### Layers that come with it
+
+**feelkit** holds everything that is only about looks, so the toolkit itself stays about work:
+the kitty background, theme, accents and icons (`k-bg`, `k-theme`, `k-icon`), where new windows
+open, and the GNOME presets (Dash to Panel, Dash2Dock, Vitals, Blur my Shell, rounded corners, no
+animations). The toolkit works without it: rofi and btop just keep their default colours.
+
+It lives in its own repo, [unix-feelkit](https://github.com/bluestero/unix-feelkit):
+
+```bash
+tk layer add https://github.com/bluestero/unix-feelkit.git   # clones into layers/feelkit, offers to set it up
+```
 
 ## Install / uninstall
 
@@ -166,20 +181,20 @@ The first time the installer changes something of yours, it keeps what you had i
 | `kitty-accents` | `k-bg accents on`: a vivid colour from the background (always readable against it, never red) for the prompt's directory, `❯` and git branch, the toolkit's pickers and highlights, and kitty's cursor, selection, links, active tab and border. Terminal colours and red prod warnings stay put |
 | `zsh` | apt `zsh zsh-autosuggestions`; `~/.zshrc`, `~/.zprofile`, `~/.zshenv` each get one managed block |
 | `login-shell` | `chsh` to zsh (log out once) |
-| `kitty-icons` | `kitty/install-kitty-icons.sh` (icons + desktop entry for `k-icon`) |
+| `kitty-icons` | `feelkit/kitty-icons/install-kitty-icons.sh` (icons + desktop entry for `k-icon`) |
 | `kitty-nautilus` | `kitty/install-kitty-gnome.sh` (kitty as default terminal, Open in Terminal in Files; Ctrl+Alt+T focuses the open kitty window, or starts kitty, via `kitty/bin/kitty-focus`, and Ctrl+Shift+Alt+T opens a new window) |
 | `kitty-centered` | GNOME setting `org.gnome.mutter center-new-windows`, so new windows (kitty included) open in the middle of the screen; the old value is put back on uninstall |
 | `window-calls` | GNOME extension Window Calls (from extensions.gnome.org) so `ws` can close and focus editor windows; log out once after installing |
 | `alt-tab-desktop` | GNOME extension in `gnome/`: after Super+D (show desktop), Alt+Tab returns to the window you minimized instead of the one before it; log out once after installing |
-| `dash-to-panel` | Dash to Panel (GNOME extension) from extensions.gnome.org: the dock and the top bar merged into one bar (app icons with window previews on the left; clock, Vitals and system menu on the right; no Activities button). Preset look from `gnome/dash-to-panel/` (bottom, 35 px, dark, own apps-button icon). Your choice: on its own or together with `dash2dock`; asked separately, default No; `./install.sh dash-to-panel` on an installed one opens the same settings menu as `vitals`; the uninstall asks whether to put your old settings back or go to the app's defaults; log out once after installing |
-| `dash2dock` | Dash2Dock Animated (macOS-style GNOME dock at the bottom) from extensions.gnome.org, with the toolkit's patches in `gnome/dash2dock/`: a click on an app with several windows shows window previews, calm drag-to-reorder, no gap above the dock; plus a preset look. Replaces Ubuntu's dock; your choice, alone or together with Dash to Panel; asked separately, default No; the uninstall puts that back; log out once after installing |
+| `dash-to-panel` | Dash to Panel (GNOME extension) from extensions.gnome.org: the dock and the top bar merged into one bar (app icons with window previews on the left; clock, Vitals and system menu on the right; no Activities button). Preset look from `feelkit/gnome/dash-to-panel/` (bottom, 35 px, dark, own apps-button icon). Your choice: on its own or together with `dash2dock`; asked separately, default No; `./install.sh dash-to-panel` on an installed one opens the same settings menu as `vitals`; the uninstall asks whether to put your old settings back or go to the app's defaults; log out once after installing |
+| `dash2dock` | Dash2Dock Animated (macOS-style GNOME dock at the bottom) from extensions.gnome.org, with the toolkit's patches in `feelkit/gnome/dash2dock/`: a click on an app with several windows shows window previews, calm drag-to-reorder, no gap above the dock; plus a preset look. Replaces Ubuntu's dock; your choice, alone or together with Dash to Panel; asked separately, default No; the uninstall puts that back; log out once after installing |
 | `hide-docker-tray` | Small GNOME extension (`gnome/hide-docker-tray@work-toolkit`, linked in) that hides Docker Desktop's tray item: no icon, empty menu, three dots that do nothing on click; log out once after installing |
 | `app-keys` | Super+1..9 for the Nth pinned dock app: launches it, brings it to the front, or minimizes it when it is already in front (`bin/k-appkey`, one short process per key press, no background process; uses Window Calls). Only windows on the current desktop count: with none there, it launches a new one. Turns GNOME's own Super+number off; the uninstall puts it back; asked with default No |
-| `vitals` | Vitals (GNOME extension) from extensions.gnome.org: CPU, memory and temperature in the top bar. Asks whether to use the toolkit's look (`gnome/vitals/`: which sensors show, fixed widths). Your earlier settings are kept once; the uninstall asks whether to put them back or go to the app's defaults. `./install.sh vitals` on an installed one opens a menu: keep your settings, re-apply the look, reset to the app's defaults, or undo the last change (the settings from just before it are kept once); log out once after installing |
-| `blur-my-shell` | Blur my Shell (GNOME extension) from extensions.gnome.org with an optional look from `gnome/blur-my-shell/` (blurred overview in Liquid Glass and Alt+Tab, applications untouched). Same settings menu as `vitals`; log out once after installing |
-| `rounded-corners` | Rounded Window Corners Reborn (GNOME extension) from extensions.gnome.org with an optional look from `gnome/rounded-window-corners/` (15 px, off for maximized and fullscreen windows). Same settings menu as `vitals`; log out once after installing |
-| `vitals-icons` | Two SVGs in `gnome/vitals-icons` (CPU chip with a solid core, RAM chip with pins) copied over the Vitals extension's `icons/original` icons, and its dropdown is centred under the pill (`menu-centered`, old value put back on uninstall); stock ones kept as `*.toolkit-orig` for the uninstall. An extension update restores the stock icons, so run it again after one |
-| `rofi` | apt `rofi`; `~/.config/rofi/config.rasi` → `rofi/config.rasi` (minimal; `colors.rasi` is written by `kitty/bin/k-rofi` from the kitty colours in use, and `k-theme` / `k-bg` re-run it on every change); GNOME shortcuts Alt+Space (open windows first, then apps; pick a window to focus it), Alt+Shift+Space (ssh), Super+S (speaker, mic, wifi, bluetooth: pick a row to switch; Ctrl+Tab / Ctrl+Shift+Tab cycle the four; a new secured wifi network asks for its password in the list) and Super+X (power: lock, suspend, hibernate, log out, restart, shut down; the last three ask first). Inside: Tab / Ctrl+Tab switches between apps, ssh, files and power; Esc closes. The shortcuts use `-normal-window` so it gets the keyboard on Wayland |
+| `vitals` | Vitals (GNOME extension) from extensions.gnome.org: CPU, memory and temperature in the top bar. Asks whether to use the toolkit's look (`feelkit/gnome/vitals/`: which sensors show, fixed widths). Your earlier settings are kept once; the uninstall asks whether to put them back or go to the app's defaults. `./install.sh vitals` on an installed one opens a menu: keep your settings, re-apply the look, reset to the app's defaults, or undo the last change (the settings from just before it are kept once); log out once after installing |
+| `blur-my-shell` | Blur my Shell (GNOME extension) from extensions.gnome.org with an optional look from `feelkit/gnome/blur-my-shell/` (blurred overview in Liquid Glass and Alt+Tab, applications untouched). Same settings menu as `vitals`; log out once after installing |
+| `rounded-corners` | Rounded Window Corners Reborn (GNOME extension) from extensions.gnome.org with an optional look from `feelkit/gnome/rounded-window-corners/` (15 px, off for maximized and fullscreen windows). Same settings menu as `vitals`; log out once after installing |
+| `vitals-icons` | Two SVGs in `feelkit/gnome/vitals-icons` (CPU chip with a solid core, RAM chip with pins) copied over the Vitals extension's `icons/original` icons, and its dropdown is centred under the pill (`menu-centered`, old value put back on uninstall); stock ones kept as `*.toolkit-orig` for the uninstall. An extension update restores the stock icons, so run it again after one |
+| `rofi` | apt `rofi`; `~/.config/rofi/config.rasi` → `rofi/config.rasi` (minimal; `colors.rasi` is written by `feelkit/bin/k-rofi` from the kitty colours in use, and `k-theme` / `k-bg` re-run it on every change); GNOME shortcuts Alt+Space (open windows first, then apps; pick a window to focus it), Alt+Shift+Space (ssh), Super+S (speaker, mic, wifi, bluetooth: pick a row to switch; Ctrl+Tab / Ctrl+Shift+Tab cycle the four; a new secured wifi network asks for its password in the list) and Super+X (power: lock, suspend, hibernate, log out, restart, shut down; the last three ask first). Inside: Tab / Ctrl+Tab switches between apps, ssh, files and power; Esc closes. The shortcuts use `-normal-window` so it gets the keyboard on Wayland |
 | `no-animations` | GNOME setting `org.gnome.desktop.interface enable-animations = false`: no window zoom animations (snappier, and no blurry flash when the rofi launcher opens and closes fast); asked with default No, old value put back on uninstall |
 | `okta-aws-cli` | latest okta-aws-cli from GitHub (sha256-checked) in `~/.local/bin`, for `okcli`. Skipped if you already have one |
 | `aws-cli` | latest AWS CLI v2 from AWS (its own installer) in `~/.local/aws-cli`, `aws` in `~/.local/bin`, for `okcli whoami` and kx's EKS sign-in. Needs unzip |
@@ -265,7 +280,7 @@ ws/bin/ws, shell/           ws (lib/workspaces.sh reads the lists)
 bin/hat, lib/hat.sh         hat: Claude, GitHub and AWS per folder
 lib/layers.sh               what a layer can hold; layers/ (gitignored) holds them
 claude/skills/work-toolkit/ the Claude Code skill (what each tool is for, what to ask before)
-kitty/                      kitty config, installers, k-icon, k-bg, k-theme (kitty/bin) + backgrounds/, themes/
+kitty/                      kitty config (kitty.conf), k-config, kitty-focus, the "Open in Terminal" installer
 starship/starship.toml      prompt
 shell/init.sh               the one file bash and zsh load (common.sh, direnv, starship, tools)
 shell/common.sh             personal aliases, PATH, env, dex, nvm (both shells)

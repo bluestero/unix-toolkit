@@ -1,6 +1,0 @@
-[/]
-border-width=0
-enable-preferences-entry=false
-global-rounded-corner-settings={'padding': <{'left': uint32 1, 'right': 1, 'top': 1, 'bottom': 1}>, 'keepRoundedCorners': <{'maximized': false, 'fullscreen': false}>, 'borderRadius': <uint32 15>, 'smoothing': <0.0>, 'borderColor': <(0.86274510622024536, 0.54117649793624878, 0.86666667461395264, 1.0)>, 'enabled': <true>}
-settings-version=uint32 7
-tweak-kitty-terminal=false

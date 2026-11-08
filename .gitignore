@@ -28,3 +28,6 @@ __pycache__/
 /PLAN-*.md
 /TICKET-*.md
 /gnome-setup-notes.md
+
+# Task notes: personal, kept next to the code but not in git
+/tasks/

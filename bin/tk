@@ -21,12 +21,9 @@ TOOLS=(
   "kx|Cloud|Kubernetes contexts and namespaces, per terminal|kubectl"
   "twin|Cloud|Twingate exit nodes|twingate"
   "ws|Editor|open workspaces (repos) in your IDE|"
-  "k-bg|Kitty|background image, brightness, opacity, accent colours|kitty"
-  "k-theme|Kitty|colour theme with live preview; Mine / All tabs|kitty"
-  "k-icon|Kitty|kitty's app icon|kitty"
   "k-config|Kitty|edit kitty.conf|kitty"
 )
-# plus each layer's commands (layers/<name>/tools, same format)
+# plus each layer's commands (<layer>/tools, same format; feelkit's k-bg, k-theme, k-icon come this way)
 # shellcheck source=../lib/layers.sh
 . "$ROOT/lib/layers.sh"
 while IFS= read -r _l; do
@@ -235,7 +232,7 @@ layer_ls() {
 layer_add() {
   local url=${1:-} name dir
   [[ -n $url ]] || die "which repo? tk layer add <git-url> [name]   e.g. git@github.com:me/acme-toolkit.git"
-  name=${2:-$(basename "${url%.git}")}; name=${name%-toolkit}
+  name=${2:-$(basename "${url%.git}")}; name=${name#unix-}; name=${name%-toolkit}   # unix-feelkit -> feelkit, acme-toolkit -> acme
   dir="$ROOT/layers/$name"
   [[ -e $dir ]] && die "layers/$name is already there (tk layer ls)"
   mkdir -p "$ROOT/layers"

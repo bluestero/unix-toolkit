@@ -52,7 +52,7 @@ for w in "${wanted[@]}"; do
 done
 named=${#wanted[@]}
 if [[ -n $layer ]]; then
-  [[ -d $repo/layers/$layer ]] || { printf '✗ no layer %s · see: tk layer ls\n' "'$layer'" >&2; exit 2; }
+  layer_path "$repo" "$layer" >/dev/null || { printf '✗ no layer %s · see: tk layer ls\n' "'$layer'" >&2; exit 2; }
   (( named )) || mapfile -t wanted < <(layer_parts "$layer")
   (( ${#wanted[@]} )) || { echo "The $layer layer has nothing to set up."; exit 0; }
 else
@@ -78,7 +78,8 @@ badge() {
 logf ""; logf "=== install $ts ($mode) ${wanted[*]}"
 # Overview: every component and its state, grouped, in one box.
 todo=() prev="" table=""
-table+="${B}COMPONENT${R}"$'\x1f'"${B}STATE${R}"$'\x1f'"${B}NOTE${R}"$'\n'
+if (( list )); then table+="${B}COMPONENT${R}"$'\x1f'"${B}KIT${R}"$'\x1f'"${B}STATE${R}"$'\x1f'"${B}NOTE${R}"$'\n'
+else table+="${B}COMPONENT${R}"$'\x1f'"${B}STATE${R}"$'\x1f'"${B}NOTE${R}"$'\n'; fi
 skipped=0
 for id in "${wanted[@]}"; do
   component_state "$id"
@@ -87,7 +88,8 @@ for id in "${wanted[@]}"; do
     [[ -n "$prev" ]] && table+=$'\n'
     prev=$(group_of "$id"); table+="${D}$prev${R}"$'\n'
   fi
-  table+="  $id"$'\x1f'"$(badge "$STATE")"$'\x1f'"$D${NOTE}$R"$'\n'
+  if (( list )); then table+="  $id"$'\x1f'"$D$(repo_of "$id")$R"$'\x1f'"$(badge "$STATE")"$'\x1f'"$D${NOTE}$R"$'\n'
+  else table+="  $id"$'\x1f'"$(badge "$STATE")"$'\x1f'"$D${NOTE}$R"$'\n'; fi
   [[ "$STATE" == missing || "$STATE" == partial ]] && todo+=("$id")
   # named on the command line and installed already: still offer its settings menu (keep / look / defaults)
   (( named )) && [[ "$STATE" == installed && " ${LOOK_PARTS[*]} " == *" $id "* ]] && todo+=("$id")

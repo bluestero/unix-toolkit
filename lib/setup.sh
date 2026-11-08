@@ -432,8 +432,18 @@ _cl_gum() {
   # gum's own key hints are too dim to read on some backgrounds and can't be
   # restyled, so they're off and the header carries them instead.
   title+=$'\n'"x  select    ↑ ↓  move    ctrl+a  all    enter  confirm    esc  cancel"
+  # gum's --height counts item rows only; the header lines come on top. Never taller than
+  # the window (header + list + a spare line), or the header scrolls off the top.
+  local h=$(( rows + 3 )) term_rows head_lines room
+  term_rows=$(stty size </dev/tty 2>/dev/null | cut -d' ' -f1)
+  head_lines=$(( $(grep -c '' <<<"$title") ))
+  if [[ $term_rows =~ ^[0-9]+$ ]]; then
+    room=$(( term_rows - head_lines - 2 ))
+    (( room < 3 )) && room=3
+    (( h > room )) && h=$room
+  fi
   out=$(printf '%s\n' "${opts[@]}" | "$GUM" choose --no-limit --no-show-help "${sel[@]}" \
-          --label-delimiter=$'\x1f' --header="$title" --height=$(( rows + 3 )) 2>/dev/tty) || return 1
+          --label-delimiter=$'\x1f' --header="$title" --height="$h" 2>/dev/tty) || return 1
   [[ -n "$out" ]] && mapfile -t CHECKLIST < <(sort -n <<<"$out")
   return 0
 }

@@ -1,0 +1,9 @@
+/* Default colours. With feelkit installed, k-rofi replaces this file with colours taken from the kitty theme and background. */
+* {
+    bg:     #16161ef0;
+    fg:     #dddddd;
+    grey:   #a0a0a0;
+    accent: #1a8fff;
+    sel:    #dddddd26;
+    line:   #dddddd40;
+}

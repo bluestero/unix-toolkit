@@ -18,3 +18,5 @@ layer_dirs() {
   for d in "$1"/layers/*/; do [[ -d $d ]] && printf '%s\n' "${d%/}"; done
   return 0
 }
+# layer_path <toolkit root> <name>: that layer's folder; 1 when there is none
+layer_path() { [[ -d $1/layers/$2 ]] && printf '%s\n' "$1/layers/$2"; }
