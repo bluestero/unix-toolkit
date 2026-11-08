@@ -444,7 +444,6 @@ uninstall_yazi() {
 yk_src="$repo/yazi/keymap.toml"
 yk_file="$HOME/.config/yazi/keymap.toml"
 label_yazi_keys() { echo "yazi keys"; }
-off_yazi_keys() { :; }   # an extra: unticked until you choose it
 title_yazi_keys() { echo "yazi: > picks a folder inside this one; ctrl+backspace deletes a word"; }
 detail_yazi_keys() { echo "a marked block from yazi/keymap.toml in ~/.config/yazi/keymap.toml (the file is made if it's missing); needs fzf"; }
 # yazi's keymap can't have both prepend_keymap = [...] and [[...prepend_keymap]] for one layer:
@@ -1379,5 +1378,3 @@ main_parts() {
 }
 # setup_cmd <id>: how to set it up again: "./install.sh", or its standalone layer's "fk install"
 setup_cmd() { local l=${LAYER_OF[$1]:-}; if [[ -n $l && -n ${STANDALONE[$l]:-} ]]; then echo "${STANDALONE[$l]} install"; else echo ./install.sh; fi; }
-# starts unticked in the installer when off_<id> says so
-on_by_default() { ! { declare -F "$(fn off "$1")" >/dev/null && "$(fn off "$1")"; }; }

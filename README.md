@@ -40,8 +40,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/bluestero/unix-toolkit/main/
 layer; repeat it for more) adds a layer in the same go. Or clone it yourself, anywhere, and run
 `./install.sh`: the installer records where it is.
 
-**3. Install.** A tab per group of parts, each ticked, so Enter twice sets it all up; untick what you
-don't want. Each change still asks first (Enter = yes).
+**3. Install.** A tab per group of parts. Nothing is ticked: tick what you want with Space, then
+Enter twice (to the summary, then set up). Each change still asks first (Enter = yes).
 
 ```bash
 tk install
@@ -115,8 +115,7 @@ Copying a folder into `layers/` works too (no updates then). Everything in a lay
 
 `lib/layers.sh` has the same list for whoever writes one. A layer's components can also say what
 they need from the machine (`requires_<id>`: `gnome`, `apt`, `linux`) and list themselves in
-`LOOK_PARTS+=(…)` to get the keep / re-apply / reset settings menu, start unticked
-(`off_<id>`, a function: unticked when it succeeds), or name two parts that shouldn't both be in
+`LOOK_PARTS+=(…)` to get the keep / re-apply / reset settings menu, or name two parts that shouldn't both be in
 (`CLASHES+=("id id|the question")`: the installer's summary asks once, default No).
 
 ### Layers that come with it
@@ -154,8 +153,7 @@ Enter goes to the **Summary** tab: everything that will be set up, with what `--
 part under the cursor. Enter there sets it up; Esc anywhere leaves with nothing changed. Parts that
 shouldn't both be in (feelkit's Dash2Dock and Dash to Panel: `fk install`), one ticked and the other
 ticked or already in, make the summary ask once whether to keep both (No goes back to their tab). Needs fzf 0.63+ (`./install.sh fzf`);
-with an older fzf it's one checklist instead. Missing parts are ticked except `yazi-keys` (an extra)
-and, in `fk install`, Dash2Dock when Dash to Panel is in.
+with an older fzf it's one checklist instead. Nothing starts ticked: you pick every part yourself.
 If [gum](https://github.com/charmbracelet/gum) isn't installed, the installer offers to fetch it
 (v2.0.2, checksum-checked, into `~/.local/bin`, no sudo) for nicer questions (and the checklist); say no
 and the plain built-in ones are used. Remove it with `rm ~/.local/bin/gum`.
@@ -188,7 +186,7 @@ feelkit's parts (kitty backgrounds, themes, accents, icons and the GNOME looks) 
 | `bash` | `~/.bashrc` keeps the Ubuntu defaults plus one line loading `shell/init.sh`; PATH, nvm, direnv/starship hooks and exact copies of the toolkit's aliases move into the repo, clashing leftovers (ble.sh, old okcli hooks, duplicate nvm) are removed. Your own aliases stay. Uninstall puts the removed lines back |
 | `btop` | installs btop (apt) if missing, links `~/.config/btop/btop.conf` → `btop/btop.conf`, and has k-theme write btop's colours from your kitty theme (re-done on every theme change). Uninstall puts your own btop config back |
 | `yazi` | yazi 26.9.1 (terminal file manager) from GitHub in `~/.local/bin`, checked against a pinned sha256; also `ya`. The `y` command (`yazi/shell/y.sh`, loaded by `shell/init.sh`) opens it and leaves your shell in the folder you quit in (`q`; `Q` quits without cd). Colours follow the kitty theme through the terminal palette. Uninstall removes the binaries; `~/.config/yazi` stays |
-| `yazi-keys` | Two keys for yazi, unticked until you choose it: `>` picks a folder inside the current one with fzf (up to 6 levels, no hidden folders), and ctrl+backspace deletes a word in yazi's text fields. Written as one marked block (`# >>> work toolkit >>>`) in `~/.config/yazi/keymap.toml`, from `yazi/keymap.toml`: added to your file if you have one (the rest stays yours), the file is made if not; if yours already has `prepend_keymap = [ ... ]` lines it says so and leaves it alone. Uninstall removes only the block |
+| `yazi-keys` | Two keys for yazi: `>` picks a folder inside the current one with fzf (up to 6 levels, no hidden folders), and ctrl+backspace deletes a word in yazi's text fields. Written as one marked block (`# >>> work toolkit >>>`) in `~/.config/yazi/keymap.toml`, from `yazi/keymap.toml`: added to your file if you have one (the rest stays yours), the file is made if not; if yours already has `prepend_keymap = [ ... ]` lines it says so and leaves it alone. Uninstall removes only the block |
 | `direnv` | latest direnv from GitHub (sha256-checked) in `~/.local/bin`, for `okcli pin`; the shell setup hooks it in. Skipped if you already have one; uninstall only removes the toolkit's |
 | `keys` | `~/.inputrc` → `shell/inputrc` (case-insensitive Tab, Up/Down search by what's typed) |
 | `commands` | `okcli`, `kx`, `twin`, `ctx`, `ws` in `~/.local/bin` |

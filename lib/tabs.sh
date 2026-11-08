@@ -32,8 +32,7 @@ tabs_pick() {
   for id in "${wanted[@]}"; do
     g=$(group_of "$id")
     grep -qxF "$g" "$T/tabs" || { echo "$g" >>"$T/tabs"; printf '%s\x1e%s\n' "$g" "${GROUP_ABOUT[$g]:-}" >>"$T/about"; }
-    on=0; [[ " ${todo[*]} " == *" $id "* ]] && on=1
-    (( on )) && on_by_default "$id" && echo "$id" >>"$T/on"
+    on=0; [[ " ${todo[*]} " == *" $id "* ]] && on=1   # can be ticked; nothing starts ticked
     printf '%s\x1e' "$id" "$g" "$on" "${ST[$id]}" "$(badge "${ST[$id]}")" "$("$(fn label "$id")")" \
       "$("$(fn title "$id")")" "$("$(fn detail "$id")")" >>"$T/info"
     printf '%s\n' "${NT[$id]}" >>"$T/info"

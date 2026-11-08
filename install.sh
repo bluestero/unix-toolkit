@@ -159,21 +159,20 @@ elif [[ "$mode" == ask && "${WORK_TOOLKIT_PLAIN:-0}" != 1 && $named == 0 ]]; the
   say ""
 fi
 
-# Pick what to set up (all ticked; untick with space). Named components or
+# Pick what to set up (nothing ticked: you tick what you want with space). Named components or
 # --yes / --dry-run skip the list.
 if [[ "$mode" == ask && $named == 0 ]] && (( ! tabs )); then
-  say "Everything below is ticked, so ${B}Enter${R} sets it all up. Untick anything you don't want."
+  say "Tick what you want with ${B}space${R}, then ${B}Enter${R} sets it up."
   say "${D}Each change still asks first (Enter = yes), and $undo undoes any of it.${R}"
   say ""
-  labels=() ids=() on="" prev=""
+  labels=() ids=() prev=""
   for id in "${todo[@]}"; do
     if [[ "$(group_of "$id")" != "$prev" ]]; then
       prev=$(group_of "$id"); labels+=("## $prev"); ids+=("")
     fi
-    on_by_default "$id" && on+="${#labels[@]} "
     labels+=("$id"$'\t'"$("$(fn title "$id")")"); ids+=("$id")
   done
-  CHECKLIST_ON=$on checklist "Pick what to set up:" "${labels[@]}" || { say "Cancelled. Nothing changed."; exit 0; }
+  checklist "Pick what to set up:" "${labels[@]}" || { say "Cancelled. Nothing changed."; exit 0; }
   picked=()
   for i in "${CHECKLIST[@]}"; do [[ -n "${ids[i]}" ]] && picked+=("${ids[i]}"); done
   todo=("${picked[@]}")

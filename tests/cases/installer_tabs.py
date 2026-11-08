@@ -52,15 +52,24 @@ def test_esc_changes_nothing(sb):
     assert not os.path.exists(sb.path("~/.bashrc")) and not os.path.exists(sb.path("~/.local/bin"))
 
 
+def test_nothing_starts_ticked(sb):
+    _, t = start(sb)
+    assert "Summary · nothing ticked" in t.text() and "[✓]" not in t.text(), t.text()
+    t.key("enter")
+    t.wait_for("Nothing ticked")
+    t.key("enter")                                        # enter with nothing ticked: leaves, nothing changed
+    assert t.wait_exit() == 0
+    assert "Nothing picked" in t.text()
+
+
 def test_tick_follows_to_the_summary(sb):
     _, t = start(sb)
-    n = int(re.search(r"Summary · (\d+) to set up", t.text()).group(1))
-    t.key("space")                                        # bash, the first row: unticked
-    t.wait_for(f"Summary · {n - 1} to set up")
+    t.key("down", "space")                                # keys, the second row
+    t.wait_for("Summary · 1 to set up")
     t.key("enter")
     t.wait_for("✓ keys ")
     t.settle()
-    assert "✓ bash " not in t.text(), "bash was unticked"
+    assert "✓ bash " not in t.text(), "only keys was ticked"
     t.key("esc")
     t.wait_exit()
 
@@ -86,6 +95,10 @@ def test_feelkit_stays_out_of_the_main_install(sb):
 
 def test_both_bars_ask_and_no_goes_back(sb):
     _, t = start(sb, "--layer=feelkit")
+    t.key("right")                                        # GNOME looks: dash2dock, dash-to-panel first
+    t.wait(lambda t: "dash2dock" in t.cursor_line(), what="the cursor on dash2dock")
+    t.key("space", "down", "space")
+    t.wait_for("Summary · 2 to set up")
     t.key("enter")
     t.wait_for("SETS UP")
     t.key("enter")
@@ -93,7 +106,7 @@ def test_both_bars_ask_and_no_goes_back(sb):
     t.key("n")
     t.wait_gone("Keep both?")
     t.wait(lambda t: "dash2dock" in t.cursor_line() and "[✓]" in t.cursor_line(),
-           what="back on the Desktop tab, on dash2dock, still ticked")
+           what="back on the GNOME looks tab, on dash2dock, still ticked")
     t.key("esc")
     assert t.wait_exit() == 0
     assert not os.path.exists(sb.path("~/.bashrc"))
@@ -101,6 +114,10 @@ def test_both_bars_ask_and_no_goes_back(sb):
 
 def test_both_bars_yes_sets_up(sb):
     _, t = start(sb, "--plain", "--layer=feelkit")
+    t.key("right")                                        # GNOME looks: dash2dock, dash-to-panel first
+    t.wait(lambda t: "dash2dock" in t.cursor_line(), what="the cursor on dash2dock")
+    t.key("space", "down", "space")
+    t.wait_for("Summary · 2 to set up")
     t.key("enter")
     t.wait_for("SETS UP")
     t.key("enter")
@@ -112,6 +129,8 @@ def test_both_bars_yes_sets_up(sb):
 
 def test_enter_on_the_summary_sets_up_the_ticked(sb):
     _, t = start(sb, "--plain")
+    t.key("space")                                        # bash
+    t.wait_for("Summary · 1 to set up")
     t.key("enter")
     t.wait_for("✓ bash ")
     t.key("enter")

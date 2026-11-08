@@ -9,7 +9,7 @@
 #                     label_/title_/detail_/state_/install_/uninstall_ functions,
 #                     group_<id> to name its group (its installer tab), and
 #                     GROUP_ABOUT[<group>]="one line" for a group of its own
-#                     off_<id> (starts unticked when it succeeds), CLASHES+=("id id|question")
+#                     CLASHES+=("id id|question") for two parts that shouldn't both be in
 #   standalone        set up on its own: holds its command (feelkit: fk), so <command> install /
 #                     uninstall run install.sh --layer=<name>; plain install.sh leaves it out
 #   tools             lines for tk:  name|group|what it does|program it needs
