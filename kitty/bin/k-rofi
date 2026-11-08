@@ -8,7 +8,7 @@ cfg=${XDG_CONFIG_HOME:-$HOME/.config}
 out=$cfg/rofi/colors.rasi
 mkdir -p "${out%/*}"
 # later files win, like in kitty (theme first, then the background's colours)
-cat "$cfg/kitty/theme.conf" "$cfg/kitty/background.conf" 2>/dev/null | awk '
+{ cat "$cfg/kitty/theme.conf" "$cfg/kitty/background.conf" 2>/dev/null; true; } | awk '
   /^[a-z_0-9]+[ \t]+#[0-9a-fA-F]{6}[ \t]*$/ { c[$1] = tolower($2) }
   function g(k, d) { return (k in c) ? c[k] : d }
   END {
