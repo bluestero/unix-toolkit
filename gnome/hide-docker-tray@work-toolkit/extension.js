@@ -6,6 +6,20 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 const HIDE = ['Docker Desktop'];
 
+// Docker's item often has no readable Id (null), so fall back to the process behind the
+// bus name: the role ends in StatusNotifierItem-<pid>-<n>.
+function nameOf(role, icon) {
+    const id = icon._indicator?.id;
+    if (id)
+        return id;
+    const pid = /StatusNotifierItem-(\d+)-/.exec(role)?.[1];
+    if (!pid)
+        return '';
+    try {
+        return new TextDecoder().decode(GLib.file_get_contents(`/proc/${pid}/comm`)[1]).trim();
+    } catch (e) { return ''; }
+}
+
 export default class HideDockerTray extends Extension {
     enable() {
         this._hidden = new Map();   // tray icon -> notify::visible handler id
@@ -31,7 +45,7 @@ export default class HideDockerTray extends Extension {
             if (!role.startsWith('appindicator-'))
                 continue;
             try {
-                if (!icon.get_stage() || !HIDE.some(p => (icon._indicator?.id ?? '').startsWith(p)))
+                if (!icon.get_stage() || !HIDE.some(p => nameOf(role, icon).startsWith(p)))
                     continue;
                 if (!this._hidden.has(icon)) {
                     this._hidden.set(icon, icon.connect('notify::visible', () => {
