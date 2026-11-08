@@ -242,8 +242,8 @@ layer_add() {
   git clone -q "$url" "$dir" || die "couldn't clone $url (no access? check: ssh -T git@github.com)"
   ok "layer $name added: ${dir/#$HOME/\~}"
   info "${C_DIM}Its commands and settings load in new terminals.${C_RESET}"
-  confirm "Set up its parts now?" y && exec "$ROOT/install.sh"
-  info "Later: tk install"
+  confirm "Set up its parts now?" y && exec "$ROOT/install.sh" --layer="$name"
+  info "Later: tk install --layer=$name"
 }
 
 layer_rm() {

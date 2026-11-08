@@ -6,7 +6,7 @@
 set -uo pipefail
 
 repo="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-mode=ask details=0 list=0 help=0
+mode=ask details=0 list=0 help=0 layer=""
 wanted=()
 for arg in "$@"; do
   case "$arg" in
@@ -16,6 +16,7 @@ for arg in "$@"; do
     -y|--yes)       mode=yes ;;
     -d|--details)   details=1 ;;
     -p|--plain)     export WORK_TOOLKIT_PLAIN=1 ;;
+    --layer=*)      layer=${arg#--layer=} ;;
     -*) printf '✗ unknown option %s · see: ./install.sh help\n' "$arg" >&2; exit 2 ;;
     *)  wanted+=("$arg") ;;
   esac
@@ -38,6 +39,7 @@ if (( help )); then
 --details	also show diffs (e.g. ~/.bashrc) before asking
 --yes	no questions, for scripted setups
 --plain	don't use or offer gum (the nicer-looking lists)
+--layer=<name>	only that layer's parts (tk layer add uses it)
 
 ./install.sh ls names every component; ./uninstall.sh undoes any of them.
 Log: ~/.local/state/work-toolkit/setup.log
@@ -49,7 +51,13 @@ for w in "${wanted[@]}"; do
   [[ " ${COMPONENTS[*]} " == *" $w "* ]] || { printf '✗ unknown command or component %s · see: ./install.sh ls\n' "'$w'" >&2; exit 2; }
 done
 named=${#wanted[@]}
-(( named )) || wanted=("${COMPONENTS[@]}")
+if [[ -n $layer ]]; then
+  [[ -d $repo/layers/$layer ]] || { printf '✗ no layer %s · see: tk layer ls\n' "'$layer'" >&2; exit 2; }
+  (( named )) || mapfile -t wanted < <(layer_parts "$layer")
+  (( ${#wanted[@]} )) || { echo "The $layer layer has nothing to set up."; exit 0; }
+else
+  (( named )) || wanted=("${COMPONENTS[@]}")
+fi
 
 if [[ "$mode" == ask && $list == 0 && ! -t 0 ]]; then
   echo "This installer asks before each change, but there's no terminal to ask in."

@@ -1589,8 +1589,18 @@ uninstall_claude_guidelines() { cg_present || { ok "not there"; return 0; }; cg_
 # Each layer's own components (lib/layers.sh), after the toolkit's.
 # shellcheck source=layers.sh
 . "$repo/lib/layers.sh"
+# layer_parts <name>: the components that layer adds, plus claude-skill when it brings skills
+declare -gA LAYER_OF=()
 while IFS= read -r _layer; do
+  _n=${#COMPONENTS[@]}
   # shellcheck disable=SC1090
   [[ -r $_layer/components.sh ]] && . "$_layer/components.sh"
+  for _id in "${COMPONENTS[@]:_n}"; do LAYER_OF[$_id]=${_layer##*/}; done
 done < <(layer_dirs "$repo")
-unset _layer
+unset _layer _n _id
+layer_parts() {
+  local id
+  for id in "${COMPONENTS[@]}"; do [[ ${LAYER_OF[$id]:-} == "$1" ]] && echo "$id"; done
+  compgen -G "$repo/layers/$1/claude/skills/*/" >/dev/null && echo claude-skill
+  return 0
+}
