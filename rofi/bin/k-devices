@@ -4,7 +4,7 @@ One script, four names: it works out which tab it is from the name it was starte
 (k-speaker, k-mic, k-wifi, k-bluetooth are symlinks to it). Pick a row to switch to it;
 the result comes as a desktop notification. A wifi network with a password asks for it
 in the same list (type it, Enter)."""
-import json, os, re, subprocess, sys
+import html, json, os, re, subprocess, sys, time
 
 KIND = os.path.basename(sys.argv[0]).removeprefix("k-")
 STATE = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "k-devices-wifi")
@@ -29,6 +29,7 @@ def notify(msg):   # shell snippet; msg may use "$1"
 
 
 def head(prompt_msg=None, custom=False):
+    print("\0markup-rows\x1ftrue")
     if prompt_msg:
         print(f"\0message\x1f{prompt_msg}")
     if not custom:
@@ -36,7 +37,8 @@ def head(prompt_msg=None, custom=False):
 
 
 def row(label, info, active=False):
-    print(("●  " if active else "    ") + label.replace("\n", " ") + "\0info\x1f" + info)
+    label = html.escape(label.replace("\n", " "), quote=False)
+    print(("● " if active else "  ") + label + "\0info\x1f" + info)
 
 
 # ------------------------------------------------------------- speaker / mic ---
@@ -54,10 +56,67 @@ def audio():
     return rows
 
 
+# Bluetooth earbuds have two modes (card profiles); wpctl only lists the one in use, so
+# like GNOME's menu each mode gets its own row. Speaker: both; mic: only Handsfree has one.
+BT_MODES = [("Headset", "a2dp-sink", "music"), ("Handsfree", "headset-head-unit", "calls, with mic")]
+
+
+def bt_cards():
+    """({device id: (name, active profile, {profile: index})} for bluetooth audio,
+    {sink or source node id: its device id})"""
+    try:
+        objs = json.loads(out("pw-dump"))
+    except ValueError:
+        return {}, {}
+    cls = "Audio/Sink" if KIND == "speaker" else "Audio/Source"
+    cards, node_dev = {}, {}
+    for o in objs:
+        info = o.get("info") or {}
+        p = info.get("props") or {}
+        if p.get("media.class") == "Audio/Device" and p.get("device.api") == "bluez5":
+            par = info.get("params") or {}
+            profs = {x["name"]: x["index"] for x in par.get("EnumProfile", []) if x.get("available") != "no"}
+            cards[o["id"]] = (p.get("device.description", "?"), (par.get("Profile") or [{}])[0].get("name", ""), profs)
+        elif p.get("media.class") == cls and "device.id" in p:
+            node_dev[o["id"]] = int(p["device.id"])
+    return cards, node_dev
+
+
+def bt_rows(dev, card, node=None):
+    name, active, profs = card
+    for mode, prefix, hint in BT_MODES[0 if KIND == "speaker" else 1:]:
+        if node and active.startswith(prefix):
+            _, wid, cur, vol, muted = node
+            row(f"{name}  ·  {mode} ({hint})  ·  {'muted' if muted else str(vol) + '%'}", "a:" + wid, cur)
+        else:
+            idx = profs.get(prefix, next((i for n, i in profs.items() if n.startswith(prefix)), None))
+            if idx is not None:
+                row(f"{name}  ·  {mode} ({hint})", f"p:{dev}:{idx}")
+
+
 def list_audio():
     head("Pick one to make it the default")
-    for name, wid, cur, vol, muted in audio():
-        row(f"{name}  ·  {'muted' if muted else str(vol) + '%'}", "a:" + wid, cur)
+    cards, node_dev = bt_cards()
+    for r in audio():
+        dev = node_dev.get(int(r[1]))
+        if dev in cards:
+            bt_rows(dev, cards.pop(dev), r)
+        else:
+            name, wid, cur, vol, muted = r
+            row(f"{name}  ·  {'muted' if muted else str(vol) + '%'}", "a:" + wid, cur)
+    for dev, card in cards.items():   # e.g. the mic tab while the buds play music: no mic yet
+        bt_rows(dev, card)
+
+
+def default_for(dev):
+    """after a mode switch: wait for the device's new sink/source, make it the default"""
+    for _ in range(25):
+        ids = [n for n, d in bt_cards()[1].items() if d == dev]
+        if ids:
+            subprocess.run(["wpctl", "set-default", str(ids[0])])
+            subprocess.run(["notify-send", "-a", "k-devices", "-i", "audio-card", "Devices", "Default " + KIND + " changed"])
+            return
+        time.sleep(0.2)
 
 
 # ------------------------------------------------------------------ bluetooth ---
@@ -93,7 +152,10 @@ def list_wifi():
     saved = {split_terse(l)[0] for l in out("nmcli", "-t", "-f", "NAME,TYPE", "connection", "show").splitlines()
              if split_terse(l)[1:2] == ["802-11-wireless"]}
     best = {}
-    for line in out("nmcli", "-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY", "device", "wifi", "list").splitlines():
+    # the last scan's results: a fresh scan takes seconds, and rofi runs every tab before it opens;
+    # rescan in the background so the next open is up to date
+    bg("nmcli device wifi rescan")
+    for line in out("nmcli", "-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY", "device", "wifi", "list", "--rescan", "no").splitlines():
         use, ssid, sig, sec = (split_terse(line) + ["", "", "", ""])[:4]
         if not ssid:
             continue
@@ -123,6 +185,9 @@ def main():
     info = os.environ.get("ROFI_INFO", "")
     retv = os.environ.get("ROFI_RETV", "0")
 
+    if arg == "--default-for":   # started by the "p:" pick below, detached
+        default_for(int(sys.argv[2]))
+        return
     if KIND == "wifi" and retv == "2" and os.path.exists(STATE):   # typed text = the password
         ssid = open(STATE).read()
         os.remove(STATE)
@@ -133,6 +198,9 @@ def main():
 
     if info.startswith("a:"):
         bg(f"wpctl set-default {info[2:]} && {notify('Default ' + KIND + ' changed')}")
+    elif info.startswith("p:"):
+        dev, idx = info[2:].split(":")
+        bg(f'wpctl set-profile {dev} {idx} && "$1" --default-for {dev}', os.path.abspath(sys.argv[0]))
     elif info.startswith("bt-power:"):
         bg(f"bluetoothctl power {info[9:]}")
     elif info.startswith("bt:"):
