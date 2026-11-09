@@ -358,7 +358,8 @@ ui_tabs() {
 # A line starting with ! is a warning row (amber), !! a loud one (red).
 # The hints sit in a grid: up to 5 columns (as many as fit), every row using the same
 # column widths, each hint ("key words") starting at its column's left edge. The hints
-# fill the rows in the order given (a tool's own keys first, then the common ones). A
+# go in the order given (a tool's own keys first, then the common ones), spread evenly
+# over their rows (7 hints in 5 columns: 4 + 3, never 5 + 2 or one left alone). A
 # warning line (! or !!) stays one line of its own, above the grid.
 # A note line ("# ↑ means …", what marks in the list mean) is the first row, grey,
 # the keys right under it.
@@ -392,24 +393,33 @@ ui_keys() {   # ui_keys <header text> [max divider width]
         kcol+=("$kc") wcol+=("$wc")
       done
     done <<<"$text"
-    # the most columns that fit: each column as wide as its widest hint
+    # the most columns that fit, each as wide as its widest hint; the hints spread evenly
+    # over the rows they need: rows = ⌈n / columns⌉, each row ⌊n / rows⌋ hints and the
+    # first n mod rows rows one more (6 → 3+3, 7 → 4+3, 11 → 4+4+3, 10 in 3 columns → 3+3+2+2).
+    # pos: a hint's column (0 starts a row)
+    local r k len
+    local -a pos=()
     for (( cols = 5; cols >= 1; cols-- )); do
-      kw=() c=0
-      for i in "${!key[@]}"; do
-        n=$(( ${#key[i]} + (${#words[i]} ? ${#words[i]} + 1 : 0) ))
-        (( n > ${kw[c]:-0} )) && kw[c]=$n
-        (( c = (c + 1) % cols ))
+      kw=() pos=() i=0
+      r=$(( (${#key[@]} + cols - 1) / cols )); (( r )) || r=1
+      for (( k = 0; k < r; k++ )); do
+        len=$(( ${#key[@]} / r + (k < ${#key[@]} % r) ))
+        for (( c = 0; c < len; c++, i++ )); do
+          pos[i]=$c
+          n=$(( ${#key[i]} + (${#words[i]} ? ${#words[i]} + 1 : 0) ))
+          (( n > ${kw[c]:-0} )) && kw[c]=$n
+        done
       done
       tot=0; for c in "${!kw[@]}"; do (( tot += kw[c] + (c ? 3 : 0) )); done
       (( tot <= room || cols == 1 )) && break
     done
-    c=0 row=""
+    row=""
     for i in "${!key[@]}"; do
-      if (( i > 0 && c == 0 )); then out+="${out:+$'\n'}${row%"${row##*[! ]}"}"; row="" c=0; fi
+      c=${pos[i]}
+      if (( i > 0 && c == 0 )); then out+="${out:+$'\n'}${row%"${row##*[! ]}"}"; row=""; fi
       n=$(( ${#key[i]} + (${#words[i]} ? ${#words[i]} + 1 : 0) ))
       printf -v pad '%*s' $(( kw[c] - n + 3 )) ''
       row+="${kcol[i]}${key[i]}$C_RESET${words[i]:+ ${wcol[i]}${words[i]}$C_RESET}$pad"
-      (( c = (c + 1) % cols ))
     done
     out+="${out:+$'\n'}${row%"${row##*[! ]}"}"
     out="${warn:+$warn$'\n'}$out"
@@ -784,7 +794,7 @@ ui_fzf() {
     UI_KEYS_DIR=$(mktemp -d) || UI_KEYS_DIR=""
     UI_KEYS_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ui.sh"
   fi
-  local keys="alt-s: sort · alt-←→: column · alt-shift-←→: move it"
+  local keys="alt-s/alt-←→: sort by column"   # alt-shift-←→ moves a column: not shown, the least used
   (( sortable )) && [[ " $* " != *' --header='* ]] && set -- "$@" "--header=$keys"
   for a in "$@"; do
     case "$a" in
@@ -792,7 +802,7 @@ ui_fzf() {
       --header-lines=1) (( sortable )) || args+=("$a") ;;   # sortable: the title row goes in the header
       --header=*)
         h=${a#--header=}
-        if (( sortable )) && [[ "$h" != *'alt-s:'* ]]; then
+        if (( sortable )) && [[ "$h" != *'alt-s'* ]]; then
           if [[ "$h" == *'esc: cancel'* ]]; then h=${h/esc: cancel/$keys · esc: cancel}; else h+=" · $keys"; fi
         fi
         hraw=$h h=$(ui_keys "$h" "$max"); (( sortable )) || args+=("--header=$h") ;;

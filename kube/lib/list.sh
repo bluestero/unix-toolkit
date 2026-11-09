@@ -92,7 +92,7 @@ list_hints() {
   if (( all )); then h+="ctrl-a: just namespace $ns · "; else h+="ctrl-a: every namespace · "; fi
   h+="ctrl-d: default namespace · "
   if (( changes )); then h+="ctrl-e: changes off · "; else h+="ctrl-e: changes · "; fi
-  h+="alt-s: sort · alt-←→: column · alt-shift-←→: move it · esc: quit"
+  h+="alt-s/alt-←→: sort by column · esc: quit"
   printf '%s' "$h"
 }
 list_max() { echo $(( $(ui_cols) * 45 / 100 - 8 )); }
