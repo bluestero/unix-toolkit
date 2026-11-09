@@ -706,6 +706,7 @@ remove_launcher_entry() {
   launcher_entry_wanted && return 0
   rm -f "$HOME/.local/share/applications/k-launch.desktop" "$launcher_icon" "$HOME/.local/share/icons/hicolor/scalable/apps/k-launch.svg"
 }
+launcher_entry_set() { [[ -f "$launcher_icon" ]] && grep -qxF "Exec=$repo/rofi/bin/k-launch apps" "$HOME/.local/share/applications/k-launch.desktop" 2>/dev/null; }
 install_launcher_entry() {
   mkdir -p "$launcher_icon_dir" "$HOME/.local/share/applications"
   convert "$repo/rofi/rofi-icon.png" -resize 512x512 "$launcher_icon" 2>>"$log_file" ||
@@ -869,6 +870,8 @@ kb_set() { # kb_set ID NAME COMMAND BINDING
   gsettings set $kb_root custom-keybindings "$cur"
 }
 kb_has() { gsettings get $kb_root custom-keybindings | grep -q "'$kb_base/custom-keybindings/$1/'"; }
+# kb_runs ID COMMAND: the shortcut exists and runs COMMAND (false after the toolkit folder moved)
+kb_runs() { kb_has "$1" && [[ $(gsettings get "$kb_schema:$kb_base/custom-keybindings/$1/" command) == "'$2'" ]]; }
 kb_del() {
   local path="$kb_base/custom-keybindings/$1/" cur
   cur=$(gsettings get $kb_root custom-keybindings)
@@ -883,9 +886,12 @@ state_rofi() { NOTE=""
   local n=0
   command -v rofi >/dev/null && (( n++ ))
   linked "$rofi_conf" "$rofi_src" && (( n++ ))
-  kb_has rofi-launcher && kb_has rofi-ssh && kb_has rofi-power && kb_has rofi-devices && (( n++ ))
-  [[ -f "$launcher_icon" && -f "$HOME/.local/share/applications/k-launch.desktop" ]] && (( n++ ))
+  rofi_keys_on && (( n++ ))
+  launcher_entry_set && (( n++ ))
   if (( n == 4 )); then STATE=installed; elif (( n )); then STATE=partial; else STATE=missing; fi; }
+k_launch="$repo/rofi/bin/k-launch"
+rofi_keys_on() { kb_runs rofi-launcher "$k_launch apps" && kb_runs rofi-ssh "$k_launch ssh" &&
+  kb_runs rofi-power "$k_launch power" && kb_runs rofi-devices "$k_launch settings"; }
 install_rofi() {
   if ! command -v rofi >/dev/null; then
     if ask "Install rofi? (apt, needs sudo)"; then
@@ -897,9 +903,9 @@ install_rofi() {
   local k_rofi; k_rofi="$(layer_path "$repo" feelkit 2>/dev/null)/bin/k-rofi"
   if [[ -x $k_rofi ]]; then dry || "$k_rofi" >>"$log_file" 2>&1 && ok "colours follow k-theme and k-bg"
   elif [[ ! -e ${rofi_conf%/*}/colors.rasi ]]; then dry || cp "$repo/rofi/colors-default.rasi" "${rofi_conf%/*}/colors.rasi" && ok "default colours (feelkit makes them follow the kitty theme)"; fi
-  if [[ -f "$launcher_icon" ]]; then ok "launcher icon already installed"
+  if launcher_entry_set; then ok "launcher icon already installed"
   else dry || install_launcher_entry && ok "launcher icon installed (log out and back in if the dock still shows none)"; fi
-  if kb_has rofi-launcher && kb_has rofi-ssh && kb_has rofi-power && kb_has rofi-devices; then ok "shortcuts already set"
+  if rofi_keys_on; then ok "shortcuts already set"
   elif ask "Set Alt+Space (apps), Alt+Shift+Space (ssh), Super+X (power menu) and Super+S (speaker, mic, wifi, bluetooth)?"; then
     kb_set rofi-launcher "Rofi launcher" "$repo/rofi/bin/k-launch apps" "<Alt>space"
     kb_set rofi-ssh "Rofi ssh" "$repo/rofi/bin/k-launch ssh" "<Alt><Shift>space"
@@ -927,7 +933,7 @@ uninstall_rofi() {
 # it uses Window Calls to find and minimize windows. GNOME's own Super+1..9 is switched off
 # while this is on (the two would clash) and comes back with the uninstall.
 ak_n=(1 2 3 4 5 6 7 8 9)
-ak_keys_on() { local i; for i in "${ak_n[@]}"; do kb_has "app-key-$i" || return 1; done; }
+ak_keys_on() { local i; for i in "${ak_n[@]}"; do kb_runs "app-key-$i" "$repo/bin/k-appkey $i" || return 1; done; }
 ak_native_off() { [[ "$(gsettings get org.gnome.shell.keybindings switch-to-application-1)" == "@as []" ]]; }
 label_app_keys() { echo "Super+number app keys"; }
 title_app_keys() { echo "Super+1..9 launches, raises or minimizes the Nth dock app (needs Window Calls; replaces GNOME's own)"; }
