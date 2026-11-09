@@ -237,10 +237,9 @@ list_main() {
       --bind "load:pos($pos)+unbind(load)"
       --bind "every(0.3):transform:f=\$(ls $(printf %q "$S")/todo.* 2>/dev/null | head -1); [ -n \"\$f\" ] && cat \"\$f\" && rm -f \"\$f\""
       # the key hints re-wrap for the room the pane leaves (fzf has moved it by then)
-      --bind 'ctrl-p:change-preview-window(right,55%,nohidden|down,60%,nohidden|hidden)+transform:. "$UI_SORT_LIB"; ui_sort_step pane'
     )
     local k
-    for k in enter esc y n ctrl-r ctrl-f ctrl-s ctrl-l ctrl-a ctrl-d ctrl-e ctrl-o ctrl-x; do
+    for k in enter esc y n ctrl-p ctrl-r ctrl-f ctrl-s ctrl-l ctrl-a ctrl-d ctrl-e ctrl-o ctrl-x; do
       binds+=(--bind "$k:transform:$cb key $k {1} {2} {q}")
     done
     out=$(ui_fzf "$(list_where)" "${look[@]}" \
@@ -315,6 +314,25 @@ list_exec() {   # what args... -> an execute(...) action
   fz execute "$c"
 }
 
+# The values pane: hidden -> right -> bottom -> hidden with ctrl-p; enter shows it on the
+# right or hides it. One state file, so both keys agree; the hints re-wrap after.
+list_pane() {   # step | toggle
+  local cur=hidden next
+  [[ -s "$S/pane_state" ]] && cur=$(<"$S/pane_state")
+  case "$1:$cur" in
+    *:hidden) next=right ;;
+    step:right) next=down ;;
+    *) next=hidden ;;
+  esac
+  echo "$next" >"$S/pane_state"
+  case "$next" in
+    right) printf '%s' 'change-preview-window(right,55%,nohidden)' ;;
+    down) printf '%s' 'change-preview-window(down,60%,nohidden)' ;;
+    *) printf '%s' 'change-preview-window(hidden)' ;;
+  esac
+  printf '%s\n' '+transform:. "$UI_SORT_LIB"; ui_sort_step pane'
+}
+
 list_key() {   # key ns name query
   local key="$1" rns="$2" name="$3" q="$4"
   case "$mode" in
@@ -340,6 +358,7 @@ list_key() {   # key ns name query
     esc) echo abort; return ;;
     ctrl-a) all=$(( !all )); list_save
             fzj "$(fz change-border-label " $(list_where) ")" "$(fz change-header "$(list_header)")" "$(list_reload)"; return ;;
+    ctrl-p) list_pane step; return ;;
     ctrl-e) list_toggle_changes "$rns" "$name"; return ;;
     ctrl-d) if [[ -z "$rns" ]]; then list_footer "${C_YELLOW}This row isn't in a namespace.${C_RESET}" toast
             elif set_default_ns "$(current_ctx)" "$rns"; then
@@ -369,7 +388,8 @@ list_key() {   # key ns name query
     workloads:ctrl-l) list_exec wlogs "$rns" "$wkind/$name" ;;
     workloads:ctrl-r) list_confirm "Restart $name? Its pods are replaced one at a time, so it stays up." "restart-workload $rns $wkind $name" ;;
     services:enter)   list_lookup forward "$rns" "service/$name" ;;
-    values:enter|values:ctrl-r|generic:enter) echo toggle-preview ;;
+    values:enter|generic:enter) list_pane toggle ;;
+    values:ctrl-r) echo toggle-preview ;;
     single-restart:enter) list_confirm "Restart $name? Its pods are replaced one at a time, so it stays up." "run" ;;
     single-*:enter) echo "print(@kx:run)+accept" ;;
   esac
