@@ -363,7 +363,7 @@ ui_tabs() {
 # A note line ("# ↑ means …", what marks in the list mean) is the first row, grey,
 # the keys right under it.
 ui_keys() {   # ui_keys <header text> [max divider width]
-  local text="$1" max="${2:-}" line item out="" warn="" note="" row w=0 plain kc wc room i c n cols tot pad
+  local text="$1" max="${2:-}" line item out="" warn="" note="" row w=0 kc wc room i c n cols tot pad
   local -a key=() words=() kcol=() wcol=() kw=()
   room=$(ui_header_width)
   if [[ "$text" == *$'\e['* ]]; then out="$text"
@@ -415,13 +415,25 @@ ui_keys() {   # ui_keys <header text> [max divider width]
     out="${warn:+$warn$'\n'}$out"
     out="${note:+$note$'\n'}$out"
   fi
-  # The divider is as wide as the longest hint line (and fits beside a pane).
-  while IFS= read -r line; do plain=$(strip_ansi "$line"); (( ${#plain} > w )) && w=${#plain}; done <<<"$out"
+  # The divider runs the whole row, ending where fzf's prompt line above it ends (it starts
+  # 2 columns further in); beside a pane it stops at the pane.
+  w=$room
+  (( ${FZF_PREVIEW_COLUMNS:-0} > 0 && ${FZF_PREVIEW_LEFT:-0} > 4 )) || w=$(( room + 2 ))
   # Inside fzf (a callback), the room already stops at the pane when it shows.
   [[ -n "$max" && -z "${FZF_COLUMNS:-}" ]] && (( w > max )) && w=$max
-  (( w > room )) && w=$room
   (( w > 0 )) || w=20
+  # a list that isn't sortable draws its header again on resize (ui_keys_redraw)
+  [[ -n "${UI_KEYS_DIR:-}" ]] && { printf '%s' "$text" >"$UI_KEYS_DIR/keys"; printf '%s' "$max" >"$UI_KEYS_DIR/max"; : >"$UI_KEYS_DIR/above"; }
   printf '%s\n%s' "$out" "$C_LINE$(printf '─%.0s' $(seq "$w"))$C_RESET"
+}
+# After a resize: the header ui_keys drew last (and the lines over it, a question), for
+# the width fzf has now. A sortable list does this itself (ui_sort_rekey).
+ui_keys_redraw() {
+  local d="${UI_KEYS_DIR:-}" keys above="" max="" h
+  [[ -n "$d" && -e "$d/keys" ]] || return 0
+  keys=$(<"$d/keys"); [[ -e "$d/above" ]] && above=$(<"$d/above"); [[ -e "$d/max" ]] && max=$(<"$d/max")
+  h=$(ui_keys "$keys" "$max"); printf '%s' "$above" >"$d/above"
+  printf 'change-header:%s' "${above:+$above$'\n'}$h"
 }
 
 # ui_fzf_at_least <version>: is the fzf on PATH at least that new? (asked once per run)
@@ -557,7 +569,9 @@ ui_sort_header() {   # [hints]
 ui_sort_keys() {   # keys [above] [max divider width]
   local d="${UI_SORT_DIR:-}"
   [[ -n "$d" ]] && { printf '%s' "$1" >"$d/keys"; printf '%s' "${2:-}" >"$d/keys.above"; printf '%s' "${3:+pane}" >"$d/keys.max"; }
-  ui_sort_header "${2:+$2$'\n'}$(ui_keys "$1" "${3:-}")"
+  local k; k=$(ui_keys "$1" "${3:-}")
+  [[ -z "$d" && -n "${UI_KEYS_DIR:-}" ]] && printf '%s' "${2:-}" >"$UI_KEYS_DIR/above"
+  ui_sort_header "${2:+$2$'\n'}$k"
 }
 # After a resize: the kept key hints wrapped for the width fzf has now.
 ui_sort_rekey() {
@@ -731,7 +745,7 @@ ui_split_cols() {
 # row first) with --header-lines=1 are laid out here; --sortable sorts them (above).
 ui_fzf() {
   local label="$1" a h="" hraw="" in="" max="" phide=0 lines=0 sortable=0 multi=0 tline="" nth="" tab=0 track="" toast=0 footer=0; shift
-  local -x UI_LIVE_ROWS="" UI_TOAST_DIR="" UI_TOAST_CLEAR="change-footer( )"
+  local -x UI_LIVE_ROWS="" UI_TOAST_DIR="" UI_TOAST_CLEAR="change-footer( )" UI_KEYS_DIR="" UI_KEYS_LIB
   local -a args=()
   for a in "$@"; do
     case "$a" in
@@ -765,6 +779,11 @@ ui_fzf() {
     elif [[ "$a" == *$'\x1f'* ]]; then print_table 3 "$(ui_pick_width)" <"$in/raw" >"$in/rows"
     else mv "$in/raw" "$in/rows"; fi
   fi
+  # not sortable, with key hints: they are drawn again when the window is resized
+  if (( ! sortable )) && [[ " $* " == *' --header='* ]]; then
+    UI_KEYS_DIR=$(mktemp -d) || UI_KEYS_DIR=""
+    UI_KEYS_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ui.sh"
+  fi
   local keys="alt-s: sort · alt-←→: column · alt-shift-←→: move it"
   (( sortable )) && [[ " $* " != *' --header='* ]] && set -- "$@" "--header=$keys"
   for a in "$@"; do
@@ -788,6 +807,7 @@ ui_fzf() {
   # --cycle: up on the first row goes to the last, down on the last to the first.
   # --height=100%: the whole window on fzf's own screen, so resizing leaves no
   # broken borders behind. confirm and ui_ask pass ~60% to stay small boxes in place.
+  [[ -n "$UI_KEYS_DIR" ]] && args+=("--bind=resize:+transform:bash -c '. \"\$UI_KEYS_LIB\"; ui_color; ui_keys_redraw'")
   (( toast )) && { UI_TOAST_DIR=$(mktemp -d) || UI_TOAST_DIR=""; }
   [[ -n "$UI_TOAST_DIR" ]] && args+=("--bind=every(0.5):+transform:f=\$(ls \"\$UI_TOAST_DIR\"/todo.* 2>/dev/null | head -1); [ -n \"\$f\" ] && cat \"\$f\" && rm -f \"\$f\"")
   local -a cmd=(fzf --ansi --reverse --cycle --height=100% --border=rounded --info=inline --bind=alt-bs:backward-kill-word --bind=ctrl-h:backward-kill-word
@@ -833,6 +853,7 @@ FOOTER
   else "${cmd[@]}" "${args[@]}" || rc=$?; fi
   [[ -n "$in" ]] && rm -rf "$in"
   [[ -n "$UI_TOAST_DIR" ]] && rm -rf "$UI_TOAST_DIR"
+  [[ -n "$UI_KEYS_DIR" ]] && rm -rf "$UI_KEYS_DIR"
   return "$rc"
 }
 
