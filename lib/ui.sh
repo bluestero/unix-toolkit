@@ -821,7 +821,9 @@ ui_fzf() {
   [[ -n "$UI_KEYS_DIR" ]] && args+=("--bind=resize:+transform:bash -c '. \"\$UI_KEYS_LIB\"; ui_color; ui_keys_redraw'")
   (( toast )) && { UI_TOAST_DIR=$(mktemp -d) || UI_TOAST_DIR=""; }
   [[ -n "$UI_TOAST_DIR" ]] && args+=("--bind=every(0.5):+transform:f=\$(ls \"\$UI_TOAST_DIR\"/todo.* 2>/dev/null | head -1); [ -n \"\$f\" ] && cat \"\$f\" && rm -f \"\$f\"")
-  local -a cmd=(fzf --ansi --reverse --cycle --height=100% --border=rounded --info=inline --bind=alt-bs:backward-kill-word --bind=ctrl-h:backward-kill-word
+  # -i --exact: the typed text matches as one piece, any case ("post" finds postman,
+  # not p…o…s…t spread over a row). ctrl-↑/↓: the first / last row.
+  local -a cmd=(fzf --ansi --reverse --cycle --height=100% --border=rounded --info=inline -i --exact --bind=alt-bs:backward-kill-word --bind=ctrl-h:backward-kill-word --bind=ctrl-up:first,ctrl-down:last
     --border-label=" $label " --pointer='▶' --marker='✓'
     --color="pointer:12,prompt:12,label:12,marker:green,header:248,border:244,info:14,hl:10,hl+:10,spinner:13")
   local rc=0
