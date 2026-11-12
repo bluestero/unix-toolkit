@@ -23,7 +23,7 @@ RECOMMENDED=(bash keys commands starship fzf)
 KITTY_PARTS=(kitty kitty-config kitty-nautilus)
 DESKTOP_PARTS=(window-calls alt-tab-desktop hide-docker-tray app-keys rofi)
 # Components with a settings look: naming one that is installed opens the keep / look / defaults menu
-LOOK_PARTS=()   # components with a settings menu; a layer adds its own (LOOK_PARTS+=)
+LOOK_PARTS=(claude-guidelines)   # components with a settings menu; a layer adds its own (LOOK_PARTS+=)
 WORKSPACE_PARTS=(repos)
 CLAUDE_PARTS=(claude-skill claude-hook claude-guard claude-guidelines)
 CLOUD_PARTS=(okta-aws-cli aws-cli kubectl eks-clusters)
@@ -1307,54 +1307,95 @@ install_claude_guard() { cgd_json has 2>/dev/null && { ok "already there"; retur
   ask "Add the PROD guard to ${ch_settings/#$HOME/\~}? (Claude asks you before a command that changes PROD)" && { dry || ch_write add "$cgd_cmd" PreToolUse Bash; } || skip; }
 uninstall_claude_guard() { cgd_json has 2>/dev/null || { ok "not there"; return 0; }; ch_write remove "$cgd_cmd" PreToolUse Bash; }
 
-# The coding guidelines (claude/guidelines/karpathy.md, a vendored copy; refresh
-# it with `tk guidelines refresh`) live in the user-level CLAUDE.md as one block
-# between markers, so everything outside the markers stays yours.
-cg_src="$repo/claude/guidelines/karpathy.md"
-cg_file="$claude_dir/CLAUDE.md"
-cg_json() {   # cg_json has|add|remove  (has: block there and current; add/remove print the new file)
-  python3 -I - "$cg_file" "$cg_src" "$1" <<'PY'
-import os, re, sys
-path, src, op = sys.argv[1:]
-S, E = "<!-- tk:karpathy-guidelines:start -->", "<!-- tk:karpathy-guidelines:end -->"
-lines = open(src).read().splitlines()
-lines[0] = "# Coding guidelines (andrej-karpathy-skills)"
-block = S + "\n" + "\n".join(lines).rstrip() + "\n" + E
-text = open(path).read() if os.path.exists(path) else ""
-pat = re.compile(re.escape(S) + r".*?" + re.escape(E), re.S)
-if op == "has":
-    m = pat.search(text)
-    sys.exit(0 if m and m.group(0) == block else 1)
-rest = pat.sub("", text).strip("\n")
-if op == "add":
-    # keep the block where it was; otherwise append it
-    out = pat.sub(lambda _: block, text, count=1) if pat.search(text) else (rest + "\n\n" if rest else "") + block + "\n"
-else:
-    out = rest + "\n" if rest else ""
-sys.stdout.write(out)
-PY
+# Coding guidelines and skills for Claude Code, as Claude Code plugins: each comes from its
+# authors' GitHub repo (a plugin marketplace), and `claude plugin update` keeps it current.
+# Picked in a list; --yes installs only the Karpathy guidelines.
+# plugin@marketplace|GitHub repo|name|what it gives
+CP_CATALOG=(
+  "andrej-karpathy-skills@karpathy-skills|multica-ai/andrej-karpathy-skills|Karpathy guidelines|think before coding, keep it simple, small diffs, verify the goal"
+  "superpowers@superpowers-dev|obra/superpowers|Superpowers|brainstorm, write and run plans, TDD, systematic debugging, code review"
+  "document-skills@anthropic-agent-skills|anthropics/skills|Anthropic documents|read and write Word, Excel, PowerPoint and PDF files"
+  "example-skills@anthropic-agent-skills|anthropics/skills|Anthropic examples|skill creator, frontend design, web app testing, MCP builder"
+  "differential-review@trailofbits|trailofbits/skills|ToB diff review|security review of a change: git history, blast radius"
+  "insecure-defaults@trailofbits|trailofbits/skills|ToB insecure defaults|hardcoded credentials, fallback secrets, weak auth defaults"
+  "sharp-edges@trailofbits|trailofbits/skills|ToB sharp edges|error-prone APIs, dangerous configs, footgun designs"
+  "static-analysis@trailofbits|trailofbits/skills|ToB static analysis|CodeQL, Semgrep and SARIF to find vulnerabilities"
+  "property-based-testing@trailofbits|trailofbits/skills|ToB property tests|write and triage property-based tests (Hypothesis, fast-check, proptest)"
+  "supply-chain-risk-auditor@trailofbits|trailofbits/skills|ToB supply chain|audit npm, PyPI and Go dependencies for supply-chain risk"
+  "modern-python@trailofbits|trailofbits/skills|ToB modern Python|modern Python practice for new projects and migrations"
+)
+cp_has() { grep -qF "\"$1\":" "$claude_dir/plugins/installed_plugins.json" 2>/dev/null; }      # plugin@marketplace
+cp_mkt() { grep -qF "\"$1\":" "$claude_dir/plugins/known_marketplaces.json" 2>/dev/null; }      # marketplace added
+cp_rows() {   # the picker's table: title row, then one row per plugin (plugin@marketplace hidden after a TAB)
+  local l id repo name what st
+  printf '%s\x1f%s\x1f%s\x1f%s\t\n' "${B}PLUGIN$R" "${B}STATE$R" "${B}WHAT YOU GET$R" "${B}FROM$R"
+  for l in "${CP_CATALOG[@]}"; do
+    IFS='|' read -r id repo name what <<<"$l"
+    if cp_has "$id"; then st="$G✓ installed$R"; else st="${D}not installed$R"; fi
+    printf '%s\x1f%s\x1f%s\x1f%s\t%s\n' "$name" "$st" "$D$what$R" "${D}github.com/$repo$R" "$id"
+  done
 }
-cg_write() {   # cg_write add|remove
+# The toolkit used to put the Karpathy guidelines in CLAUDE.md as a marked block; the plugin replaces it.
+cg_file="$claude_dir/CLAUDE.md"
+cg_present() { [[ -f "$cg_file" ]] && grep -q 'tk:karpathy-guidelines:start' "$cg_file"; }
+cg_remove() {   # drops that block; the rest of the file stays
   local tmp b; tmp=$(mktemp)
-  cg_json "$1" >"$tmp" || { rm -f "$tmp"; fail "couldn't update ${cg_file/#$HOME/\~}"; return 1; }
-  mkdir -p "$claude_dir"; b=$(backup "$cg_file")
+  python3 -I - "$cg_file" >"$tmp" <<'PY' || { rm -f "$tmp"; fail "couldn't update ${cg_file/#$HOME/\~}"; return 1; }
+import re, sys
+text = open(sys.argv[1]).read()
+rest = re.sub(r"<!-- tk:karpathy-guidelines:start -->.*?<!-- tk:karpathy-guidelines:end -->", "", text, flags=re.S).strip("\n")
+sys.stdout.write(rest + "\n" if rest else "")
+PY
+  b=$(backup "$cg_file")
   if [[ -s "$tmp" ]]; then cat "$tmp" >"$cg_file"; else rm -f "$cg_file"; fi
   rm -f "$tmp"
-  logf "  $1 coding guidelines in $cg_file${b:+ (backup: $b)}"
-  ok "done${b:+ (backup: ${b/#$HOME/\~})}"
+  logf "  removed the old guidelines block from $cg_file${b:+ (backup: $b)}"
+  ok "old copy removed from ${cg_file/#$HOME/\~}${b:+ (backup: ${b/#$HOME/\~})}"
 }
-cg_present() { [[ -f "$cg_file" ]] && grep -q 'tk:karpathy-guidelines:start' "$cg_file"; }
-label_claude_guidelines() { echo "Claude guidelines"; }
-title_claude_guidelines() { echo "Claude Code follows the same coding guidelines in every project (think first, keep it simple, small diffs)"; }
-detail_claude_guidelines() { echo "one marked block in ${cg_file/#$HOME/\~}; the rest of that file is left alone"; }
-state_claude_guidelines() { NOTE=""
+label_claude_guidelines() { echo "Claude guidelines & skills"; }
+title_claude_guidelines() { echo "Pick coding guidelines and skills for Claude Code (Karpathy, Superpowers, Anthropic, Trail of Bits)"; }
+detail_claude_guidelines() { echo "Claude Code plugins from their authors' GitHub repos, for every project; claude plugin update keeps them current"; }
+state_claude_guidelines() { local l id names=""; NOTE=""
   type -P claude >/dev/null || [[ -d "$claude_dir" ]] || { STATE=n/a; NOTE="Claude Code isn't installed"; return; }
-  if cg_json has 2>/dev/null; then STATE=installed
-  elif cg_present; then STATE=partial; NOTE="out of date"
+  for l in "${CP_CATALOG[@]}"; do id=${l%%|*}; cp_has "$id" && names+="${names:+, }$(cut -d'|' -f3 <<<"$l")"; done
+  if cg_present; then STATE=partial; NOTE="an old copy in CLAUDE.md; the Karpathy plugin replaces it"
+  elif [[ -n $names ]]; then STATE=installed; NOTE=$names
   else STATE=missing; fi; }
-install_claude_guidelines() { cg_json has 2>/dev/null && { ok "already there"; return; }
-  ask "$(cg_present && echo Update || echo Add) the coding guidelines in ${cg_file/#$HOME/\~}? (every Claude Code project)" && { dry || cg_write add; } || skip; }
-uninstall_claude_guidelines() { cg_present || { ok "not there"; return 0; }; cg_write remove; }
+install_claude_guidelines() {
+  local picked="" id repo name what karpathy=${CP_CATALOG[0]%%|*}
+  type -P claude >/dev/null || { skip "the claude command isn't on PATH"; return; }
+  case "$mode" in
+    dry) say "  ${C}?${R} Pick the guidelines and skills to install ${D}(dry run: not asked)${R}" ;;
+    yes) picked=$karpathy ;;
+    *)
+      if ! type -P fzf >/dev/null || [[ ! -t 0 ]]; then skip "picking needs fzf and a terminal"; return; fi
+      picked=$(cp_rows | ui_fzf "Claude guidelines & skills" --multi --header-lines=1 --delimiter=$'\t' --with-nth=1 \
+        --header='tab: tick/untick · enter: install the ticked ones · esc: cancel' | cut -f2) || { skip; return; } ;;
+  esac
+  while IFS= read -r id; do
+    [[ -n $id ]] || continue
+    IFS='|' read -r _ repo name what <<<"$(printf '%s\n' "${CP_CATALOG[@]}" | grep -m1 -F "$id|")"
+    cp_has "$id" && { ok "$name: already installed"; continue; }
+    ask "Install $name? (Claude Code plugin from github.com/$repo)" || { skip; continue; }
+    dry && continue
+    cp_mkt "${id#*@}" || claude plugin marketplace add "$repo" >>"$log_file" 2>&1 ||
+      { fail "couldn't add github.com/$repo to Claude Code (see the log)"; continue; }
+    if claude plugin install "$id" >>"$log_file" 2>&1; then ok "$name installed"
+    else fail "$name not installed (see the log)"; fi
+  done <<<"$picked"
+  cg_present || return 0
+  if cp_has "$karpathy"; then
+    ask "Remove the old copy of the Karpathy guidelines from ${cg_file/#$HOME/\~}? (the plugin replaces it)" && { dry || cg_remove; } || skip
+  elif ! dry; then warn "an old copy of the Karpathy guidelines stays in ${cg_file/#$HOME/\~}; pick Karpathy guidelines to move it to the plugin"; fi
+}
+uninstall_claude_guidelines() { local l id n=0
+  for l in "${CP_CATALOG[@]}"; do
+    id=${l%%|*}; cp_has "$id" || continue; (( n++ ))
+    if claude plugin uninstall "$id" >>"$log_file" 2>&1; then ok "removed $(cut -d'|' -f3 <<<"$l")"
+    else fail "couldn't remove $(cut -d'|' -f3 <<<"$l") (see the log)"; fi
+  done
+  cg_present && { (( n++ )); cg_remove; }
+  (( n )) || ok "not there"; }
 
 # -------------------------------------------------------------- layers ---
 # Each layer's own components (lib/layers.sh), after the toolkit's.

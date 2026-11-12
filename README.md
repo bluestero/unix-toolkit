@@ -52,7 +52,7 @@ ln -sfn ~/.local/share/unix-toolkit/bin/tk ~/.local/bin/tk                      
 Plain `tk` works once you open a new terminal after installing. Layers are added the same way,
 over SSH: `tk layer add git@github.com:<owner>/<repo>.git`.
 
-**3. Install.** A tab per group of parts. Nothing is ticked: tick what you want with Space, then
+**3. Install.** A tab per group of parts. Nothing is ticked: tick what you want with Tab, then
 Enter twice (to the summary, then set up). Each change still asks first (Enter = yes).
 
 ```bash
@@ -121,7 +121,6 @@ Copying a folder into `layers/` works too (no updates then). Everything in a lay
 | `tools` | commands for `tk ls` and the `tk` picker: `name\|group\|what it does\|program it needs` |
 | `workspaces` | a shared `ws` list; `@<name>` in your own list brings it in |
 | `claude/skills/<skill>/` | Claude Code skills, linked by the `claude-skill` component |
-| `claude/guidelines/` | Vendored coding guidelines, merged into `CLAUDE.md` by the `claude-guidelines` component |
 
 | `standalone` | the layer is set up on its own: the file holds its command (feelkit's says `fk`), so `fk install` / `fk uninstall` set up and remove its parts, and `tk install`, `tk uninstall` and `./install.sh ls` leave them out; `tk status` and `tk doctor` give it one line ("6 of 11 parts set up → fk install") |
 
@@ -160,7 +159,7 @@ fk uninstall                                                 # removes its parts
 The installer opens on a tab per group (Recommended, Kitty, Optional, Desktop, Cloud, Workspaces,
 Claude Code, then each layer's own; a standalone layer such as feelkit has its own: `fk install`). A tab says in one line what the group is, then lists its parts
 with their state (installed, partly, not installed, not supported here) and what each gets you; the
-footer shows what the part under the cursor touches on disk. ←/→ or Tab change tabs, Space ticks,
+footer shows what the part under the cursor touches on disk. ←/→ change tabs, Tab ticks,
 Enter goes to the **Summary** tab: everything that will be set up, with what `--dry-run` prints for the
 part under the cursor. Enter there sets it up; Esc anywhere leaves with nothing changed. Parts that
 shouldn't both be in (feelkit's Dash2Dock and Dash to Panel: `fk install`), one ticked and the other
@@ -222,7 +221,7 @@ feelkit's parts (kitty backgrounds, themes, accents, icons and the GNOME looks) 
 | `claude-skill` | Links `claude/skills/work-toolkit` (and each layer's skills) into Claude Code's skills (`$CLAUDE_CONFIG_DIR`, else `~/.claude`), so Claude knows okcli, kx, ctx and the rest in every repo: run AWS and kubectl through `okcli exec` / `kx exec` / `direnv exec`, and ask before prod changes or defaults |
 | `claude-hook` | Adds a SessionStart hook to Claude Code's `settings.json` that runs `ctx plain`, so every session starts knowing the AWS profile (and if it's PROD), the repo pin and the cluster. Only that one entry is added or removed; the rest of the file is kept |
 | `claude-guard` | Adds a PreToolUse hook for Bash (`tk __guard`, in `claude/guard.sh`): Claude Code asks you first before a command that changes something on a PROD AWS profile or Kubernetes context, or that runs aws / kubectl without naming one while the inherited one is PROD; it also tells Claude when a session has under 15 minutes left. Anything else goes through the normal permission flow |
-| `claude-guidelines` | Adds the coding guidelines (`claude/guidelines/karpathy.md`, a vendored copy of andrej-karpathy-skills' `CLAUDE.md`) to Claude Code's user-level `CLAUDE.md` (`$CLAUDE_CONFIG_DIR`, else `~/.claude`), so they apply in every project. Only the block between the `tk:karpathy-guidelines` markers is added, updated or removed; the rest of the file is kept. `tk guidelines refresh` fetches upstream and shows the diff before replacing the copy |
+| `claude-guidelines` | Pick coding guidelines and skills for Claude Code, installed as Claude Code plugins from their authors' GitHub repos (`claude plugin install`, user scope, every project; `claude plugin update` keeps them current): [Karpathy guidelines](https://github.com/multica-ai/andrej-karpathy-skills), [Superpowers](https://github.com/obra/superpowers), [Anthropic's document and example skills](https://github.com/anthropics/skills) and a few [Trail of Bits security skills](https://github.com/trailofbits/skills). `--yes` installs only the Karpathy guidelines. Naming it again (`tk install claude-guidelines`) reopens the picker. An old copy of the guidelines in `CLAUDE.md` (the `tk:karpathy-guidelines` block earlier versions added) is removed once the plugin is in. Uninstalling removes the plugins on this list |
 
 ## zsh
 
