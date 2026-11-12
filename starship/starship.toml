@@ -16,7 +16,7 @@ palette = "custom1"
 
 format = """\
 $directory\
-( [·](244) ${custom.giturl}$git_branch${custom.git_worktree}$git_state)\
+( [·](244) ${custom.giturl}${env_var.HAT_GH}$git_branch${custom.git_worktree}$git_state)\
 ( [·](244) $python)( [·](244) $nodejs)( [·](244) $golang)( [·](244) $rust)( [·](244) $docker_context)\
 ( [·](244) $kubernetes)\
 ( [·](244) ${env_var.OKCLI_AWS}${env_var.OKCLI_AWS_PROD}${env_var.OKCLI_AWS_EXPIRED}${env_var.OKCLI_AWS_LEFT}${env_var.OKCLI_AWS_LEFT_LOW})\
@@ -63,8 +63,11 @@ diverged   = "[⇕⇡$ahead_count⇣$behind_count](mauve)"
 [python]
 symbol = " "
 style = "yellow"
-version_format = "v${raw}"
-format = "[$symbol$version( \\($virtualenv\\))]($style)"
+# Only in an active virtualenv, by its name: the version is noise.
+detect_extensions = []
+detect_files = []
+detect_folders = []
+format = "[$symbol$virtualenv]($style)"
 
 [nodejs]
 symbol = " "
@@ -128,6 +131,11 @@ format = " [$env_value](green)"
 
 [env_var.OKCLI_AWS_LEFT_LOW]
 format = " [$env_value](yellow)"
+
+# The GitHub account git uses in this repo, only when it isn't your default one
+# (shell/hat.sh sets it): just before the branch.
+[env_var.HAT_GH]
+format = "[$env_value](lavender)[ · ](244)"
 
 [jobs]
 symbol = "✦"

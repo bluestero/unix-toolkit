@@ -224,7 +224,7 @@ uninstall_commands() {
 ss="$HOME/.config/starship.toml"; ss_src="$repo/starship/starship.toml"
 label_starship() { echo "Starship prompt"; }
 title_starship() { echo "Prompt showing git branch, k8s cluster, AWS profile and PROD warnings"; }
-detail_starship() { echo "prompt config (git, python, k8s, AWS profile + expiry, PROD markers); starship itself, latest from GitHub (sha256-checked), in ~/.local/bin if it isn't installed"; }
+detail_starship() { echo "prompt config (git + GitHub account when it isn't your default, Python virtualenv, k8s, AWS profile + expiry, PROD markers); starship itself, latest from GitHub (sha256-checked), in ~/.local/bin if it isn't installed"; }
 state_starship() { NOTE=""; if linked "$ss" "$ss_src"; then STATE=installed; else STATE=missing; fi
   type -P starship >/dev/null || { NOTE="starship itself isn't installed"; [[ $STATE == installed ]] && STATE=partial; }; }
 install_starship() {

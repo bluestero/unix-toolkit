@@ -76,6 +76,7 @@ for _f in \
   twingate/shell/twin.sh \
   ws/shell/ws.sh \
   kitty/shell/k-config.sh \
+  shell/hat.sh \
   shell/tk.sh
 do
   [ -r "$_work_root/$_f" ] && . "$_work_root/$_f"
