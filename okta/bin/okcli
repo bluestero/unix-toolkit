@@ -715,6 +715,8 @@ cmd_exec() {
   [[ "${1:-}" == "--" ]] && shift
   [[ $# -ge 1 ]] || die "Usage: okcli exec <profile> -- <command...>"
   require_profile "$name"
+  # No terminal (a script, an AI agent): the Okta sign-in would wait unseen, so stop here.
+  is_fresh "$name" || [[ -t 0 ]] || die "Session for '$name' expired. Refresh it in a terminal: okcli refresh $name"
   is_fresh "$name" || refresh_profiles "$name" || die "Could not refresh '$name'."
   unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
   AWS_PROFILE="$name" exec "$@"

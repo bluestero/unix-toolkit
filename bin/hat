@@ -140,6 +140,29 @@ cmd_show() {
   } | ui_fields hat "$(legend)"
 }
 
+# hat exec -- <cmd...>: one command as this folder's hat. AWS: its profile, through
+# okcli exec (stops if the session expired). GitHub: gh gets that account's own login
+# (GH_TOKEN, for this command only), never whichever account gh has active; with no
+# login for it, gh says it isn't signed in instead of acting as someone else. Git
+# already follows the folder (the gitdir rules).
+cmd_exec() {
+  [[ ${1:-} == -- ]] && shift
+  [[ $# -ge 1 ]] || die "Usage: hat exec -- <command...>"
+  local -a x; local g a t
+  IFS=$'\t' read -r -a x <<<"$(hat_get "$PWD" | sed 's/\t/\t·/g; s/^/·/')"
+  g=${x[2]#·} a=${x[4]#·}
+  if [[ -n $g && $g != *@* ]] && command -v gh >/dev/null; then
+    if t=$(gh auth token -u "$g" 2>/dev/null) && [[ -n $t ]]; then export GH_TOKEN=$t
+    else
+      warn "gh has no login for $g (gh auth login), so gh runs signed out here."
+      export GH_CONFIG_DIR="$HAT_DIR/no-gh-login"; mkdir -p "$GH_CONFIG_DIR"; unset GH_TOKEN GITHUB_TOKEN
+    fi
+  fi
+  if [[ -n $a ]] && command -v okcli >/dev/null; then exec okcli exec "$a" -- "$@"; fi
+  [[ -n $a ]] && export AWS_PROFILE=$a
+  exec "$@"
+}
+
 # ------------------------------------------------------------- accounts ---
 valid_name() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; }
 # the listed folders that set a profile/account themselves
@@ -240,7 +263,11 @@ github_add() {
   while :; do
     r=$(gh_check "$a" "$key")
     case $r in
-      ok) gh_write "$a" "$name" "$email" "$key"; ok "GitHub account $a ($email): GitHub knows its key"; return ;;
+      ok) gh_write "$a" "$name" "$email" "$key"; ok "GitHub account $a ($email): GitHub knows its key"
+          if command -v gh >/dev/null && ! hat_gh_signed_in "$a" && confirm "Also sign the gh command in as $a? (in the browser)" y; then
+            github_login "$a"
+          fi
+          return ;;
       other*) die "GitHub says $(tilde "$key") belongs to ${r#other }, not $a" ;;
       locked) die "$(tilde "$key") has a passphrase and isn't loaded: ssh-add $(tilde "$key"), then run this again" ;;
       error*) die "Couldn't ask GitHub: ${r#error }" ;;
@@ -249,6 +276,27 @@ github_add() {
     info "  $(gh_pub "$key")"
     confirm "Added it? Check again" y || die "Not added: GitHub doesn't know the key yet."
   done
+}
+# gh keeps its own sign-ins, apart from git's keys: hat exec gives gh the folder's one.
+# gh signs in whoever the browser is signed in as, so check it's <account>; and put
+# gh's active account back as it was (a new sign-in becomes the active one).
+github_login() {
+  local a=$1 prev now
+  [[ -f $HAT_GH/$a.gitconfig ]] || die "No GitHub account '$a' · see: hat github ls"
+  command -v gh >/dev/null || die "The gh command isn't installed"
+  hat_gh_signed_in "$a" && { ok "gh is already signed in as $a"; return 0; }
+  prev=$(hat_gh_active)
+  info "Sign the browser in to github.com as ${C_BOLD}$a${C_RESET} first: gh signs in whoever the browser is."
+  info "Then open the link below and type the code:"
+  gh auth login --web --hostname github.com --git-protocol ssh </dev/null || die "gh sign-in didn't finish"
+  now=$(hat_gh_active)
+  [[ -n $prev && $prev != "$now" ]] && gh auth switch --hostname github.com --user "$prev" >/dev/null 2>&1
+  if [[ $now != "$a" ]]; then
+    warn "The browser was signed in as $now, so gh signed in as $now, not $a."
+    info "    Sign the browser in as $a, then: hat github login $a"
+    return 1
+  fi
+  ok "gh is signed in as $a${prev:+ (its active account is still $prev)}"
 }
 github_rm() {
   local a=$1 p
@@ -369,13 +417,19 @@ p_to_list() {   # [toast]
 p_redraw() { p_jump; ip_join "$(p_reload)" "$(p_footer)"; }
 
 # ---- the accounts lists (alt-c, alt-g)
+# the gh command's sign-in for an account: ✓, or how to add it
+gh_cell() {
+  command -v gh >/dev/null || { printf '%s' "${C_DIM}–${C_RESET}"; return; }
+  if hat_gh_signed_in "$1"; then printf '%s' "${C_GREEN}✓${C_RESET}"
+  else printf '%s' "${C_YELLOW}✗ not signed in${C_RESET}"; fi
+}
 p_acct_rows() {   # kind
   local v
   if [[ $1 == github ]]; then
-    printf '\t%s\n' "  ${C_BOLD}ACCOUNT${C_RESET}$S${C_BOLD}EMAIL${C_RESET}$S${C_BOLD}KEY${C_RESET}"
+    printf '\t%s\n' "  ${C_BOLD}ACCOUNT${C_RESET}$S${C_BOLD}EMAIL${C_RESET}$S${C_BOLD}KEY${C_RESET}$S${C_BOLD}GH${C_RESET}"
     while IFS= read -r v; do
       [[ -n $v ]] || continue
-      printf '%s\t  %s\n' "$v" "$v$S$(hat_gh_email "$v")$S$(gh_key "$v")$(hat_github_key_ok "$v" || printf ' %s' "${C_YELLOW}missing${C_RESET}")"
+      printf '%s\t  %s\n' "$v" "$v$S$(hat_gh_email "$v")$S$(gh_key "$v")$(hat_github_key_ok "$v" || printf ' %s' "${C_YELLOW}missing${C_RESET}")$S$(gh_cell "$v")"
     done <<<"$(hat_github_accounts)"
   else
     printf '\t%s\n' "  ${C_BOLD}PROFILE${C_RESET}$S${C_BOLD}FOLDER${C_RESET}$S${C_BOLD}FOLDERS WEARING IT${C_RESET}"
@@ -387,7 +441,7 @@ p_acct_rows() {   # kind
 }
 p_to_acct() {   # kind [toast]
   local -a a; local k=$1 note
-  if [[ $k == github ]]; then note="# a GitHub account: commit name and email, and the SSH key GitHub knows it by"
+  if [[ $k == github ]]; then note="# a GitHub account: commit name and email, and the SSH key GitHub knows it by · GH: the gh command's sign-in (hat github login <account>)"
   else note="# a Claude profile: its own sign-in, history and settings (~/.claude-profiles/<name>)"; fi
   a=("$(ip_fz reload-sync "$(p_cmd __acctrows "$k")")" "$(ip_back)" "pos(1)" "$(ip_fz change-query "")"
      "$(ip_fz change-header "$(p_keys "$note"$'\n'"alt-a: add · ctrl-x: remove · esc: back to the folders")")"
@@ -671,10 +725,12 @@ usage() {
 hat	the panel: every folder wearing a hat	↑↓ folder · alt-←→ column · ←→ change · enter save
 hat ls	every folder with a hat (and this one)
 hat show [folder]	what this folder gets, and from where
+hat exec -- <command>	run one command as this folder's hat (AWS profile, gh account)	for scripts and AI agents
 hat set [folder] [claude=…] [github=…] [aws=…]	give a folder a hat; =- goes back to the default	no values: the panel, on that folder
 hat off [folder]	take its hats off
 hat claude [add|rm <name>]	Claude profiles (~/.claude-profiles/<name>)	no word: their list in the panel
 hat github [add|rm <account>]	GitHub accounts: commit name, email and SSH key	added only once GitHub knows the key
+hat github login <account>	sign the gh command in as it (browser), for hat exec	gh keeps its own sign-ins
 hat help	this page
 
 A hat covers every folder and repo under it. Claude and AWS go in the folder's
@@ -687,6 +743,7 @@ cmd_kind() {   # hat claude|github [add <name>|rm <name>|ls]
   local k=$1; shift
   case "${1:-}" in
     add) "${k}_add" "${2:-}" ;;
+    login) [[ $k == github ]] || ui_unknown "hat $k" "$1"; [[ -n ${2:-} ]] || die "Which one? · see: hat github ls"; github_login "$2" ;;
     rm|remove) [[ -n ${2:-} ]] || die "Which one? · see: hat $k ls"; "${k}_rm" "$2" ;;
     "") panel "$k" ;;
     ls)
@@ -703,6 +760,7 @@ case "${1:-}" in
   show) cmd_show "${2:-}" ;;
   set) shift; cmd_set "$@" ;;
   off) cmd_off "${2:-}" ;;
+  exec) shift; cmd_exec "$@" ;;
   claude|github) k=$1; shift; cmd_kind "$k" "$@" ;;
   # the panel's callbacks (IP is its state folder); a callback has no terminal to go by
   __*) [[ -z ${NO_COLOR:-} ]] && ui_color ;;&

@@ -17,7 +17,7 @@
 # shellcheck source=layers.sh
 . "$repo/lib/layers.sh"
 
-COMPONENTS=(bash keys commands starship fzf kitty kitty-config kitty-nautilus zsh login-shell btop yazi yazi-keys direnv window-calls alt-tab-desktop hide-docker-tray app-keys rofi okta-aws-cli aws-cli kubectl eks-clusters repos claude-skill claude-hook claude-guidelines)
+COMPONENTS=(bash keys commands starship fzf kitty kitty-config kitty-nautilus zsh login-shell btop yazi yazi-keys direnv window-calls alt-tab-desktop hide-docker-tray app-keys rofi okta-aws-cli aws-cli kubectl eks-clusters repos claude-skill claude-hook claude-guard claude-guidelines)
 # Shown in groups in the checklist; the rest are optional extras.
 RECOMMENDED=(bash keys commands starship fzf)
 KITTY_PARTS=(kitty kitty-config kitty-nautilus)
@@ -25,7 +25,7 @@ DESKTOP_PARTS=(window-calls alt-tab-desktop hide-docker-tray app-keys rofi)
 # Components with a settings look: naming one that is installed opens the keep / look / defaults menu
 LOOK_PARTS=()   # components with a settings menu; a layer adds its own (LOOK_PARTS+=)
 WORKSPACE_PARTS=(repos)
-CLAUDE_PARTS=(claude-skill claude-hook claude-guidelines)
+CLAUDE_PARTS=(claude-skill claude-hook claude-guard claude-guidelines)
 CLOUD_PARTS=(okta-aws-cli aws-cli kubectl eks-clusters)
 # Which repo a component comes from: the toolkit, or the layer that adds it (feelkit, ...).
 repo_of() { echo "${LAYER_OF[$1]:-toolkit}"; }
@@ -704,16 +704,19 @@ launcher_icon_dir="$HOME/.local/share/icons/hicolor/512x512/apps"; launcher_icon
 launcher_entry_wanted() { kb_has rofi-launcher || { declare -F feelkit_wants_launcher_entry >/dev/null && feelkit_wants_launcher_entry; }; }
 remove_launcher_entry() {
   launcher_entry_wanted && return 0
-  rm -f "$HOME/.local/share/applications/k-launch.desktop" "$launcher_icon" "$HOME/.local/share/icons/hicolor/scalable/apps/k-launch.svg"
+  rm -f "$HOME/.local/share/applications/k-launch.desktop" "$HOME/.local/share/applications/rofi.desktop" "$launcher_icon" "$HOME/.local/share/icons/hicolor/scalable/apps/k-launch.svg"
 }
-launcher_entry_set() { [[ -f "$launcher_icon" ]] && grep -qxF "Exec=$repo/rofi/bin/k-launch apps" "$HOME/.local/share/applications/k-launch.desktop" 2>/dev/null; }
+launcher_entry_set() { [[ -f "$launcher_icon" ]] && grep -qxF "Exec=$repo/rofi/bin/k-launch apps" "$HOME/.local/share/applications/k-launch.desktop" 2>/dev/null &&
+  [[ -f "$HOME/.local/share/applications/rofi.desktop" ]]; }
 install_launcher_entry() {
   mkdir -p "$launcher_icon_dir" "$HOME/.local/share/applications"
   convert "$repo/rofi/rofi-icon.png" -resize 512x512 "$launcher_icon" 2>>"$log_file" ||
     install -m 644 "$repo/rofi/rofi-icon.png" "$launcher_icon"
   printf '%s\n' "[Desktop Entry]" "Type=Application" "Name=Launcher" "Comment=App launcher (Alt+Space)" \
-    "Exec=$repo/rofi/bin/k-launch apps" "Icon=k-launch" "Terminal=false" "Categories=Utility;" "StartupWMClass=Rofi" \
+    "Exec=$repo/rofi/bin/k-launch apps" "Icon=$launcher_icon" "Terminal=false" "Categories=Utility;" "StartupWMClass=Rofi" \
     >"$HOME/.local/share/applications/k-launch.desktop"
+  # GNOME's panel matches rofi's window to the system rofi.desktop (a gear icon); this copy wins over it
+  sed "s|^Icon=.*|Icon=$launcher_icon|" /usr/share/applications/rofi.desktop >"$HOME/.local/share/applications/rofi.desktop"
 }
 
 # -------------------------------------------------------- window-calls ---
@@ -1250,33 +1253,34 @@ install_claude_skill() { local l t
   done < <(cs_pairs); }
 uninstall_claude_skill() { local l t; while IFS=$'\t' read -r l t; do unlink_file "$l" "$t"; done < <(cs_pairs); }
 
-# The hook is the one SessionStart entry whose command is $ch_cmd. settings.json
-# is edited as JSON (python), everything else in it is kept as is.
+# The hook is the one SessionStart entry whose command is $ch_cmd (the guard: the one
+# PreToolUse entry for Bash whose command is $cgd_cmd). settings.json is edited as
+# JSON (python), everything else in it is kept as is.
 ch_settings="$claude_dir/settings.json"
 ch_cmd="ctx plain 2>/dev/null || true"
-ch_json() {   # ch_json has|add|remove  (add/remove print the new settings)
-  python3 -I - "$ch_settings" "$ch_cmd" "$1" <<'PY'
+ch_json() {   # ch_json has|add|remove [command event matcher]  (add/remove print the new settings)
+  python3 -I - "$ch_settings" "${2:-$ch_cmd}" "$1" "${3:-SessionStart}" "${4:-}" <<'PY'
 import json, os, sys
-path, cmd, op = sys.argv[1:]
+path, cmd, op, event, matcher = sys.argv[1:]
 d = json.load(open(path)) if os.path.exists(path) and os.path.getsize(path) else {}
-ss = d.setdefault("hooks", {}).setdefault("SessionStart", [])
+ss = d.setdefault("hooks", {}).setdefault(event, [])
 mine = lambda g: any(h.get("command") == cmd for h in g.get("hooks", []))
 if op == "has":
     sys.exit(0 if any(mine(g) for g in ss) else 1)
 ss[:] = [g for g in ss if not mine(g)]
 if op == "add":
-    ss.append({"hooks": [{"type": "command", "command": cmd, "timeout": 10}]})
-if not ss: del d["hooks"]["SessionStart"]
+    ss.append({**({"matcher": matcher} if matcher else {}), "hooks": [{"type": "command", "command": cmd, "timeout": 10}]})
+if not ss: del d["hooks"][event]
 if not d["hooks"]: del d["hooks"]
 print(json.dumps(d, indent=2))
 PY
 }
-ch_write() {   # ch_write add|remove
+ch_write() {   # ch_write add|remove [command event matcher]
   local tmp b; tmp=$(mktemp)
-  ch_json "$1" >"$tmp" || { rm -f "$tmp"; fail "couldn't read ${ch_settings/#$HOME/\~} (not valid JSON?)"; return 1; }
+  ch_json "$@" >"$tmp" || { rm -f "$tmp"; fail "couldn't read ${ch_settings/#$HOME/\~} (not valid JSON?)"; return 1; }
   mkdir -p "$claude_dir"; b=$(backup "$ch_settings")
   cat "$tmp" >"$ch_settings"; rm -f "$tmp"
-  logf "  $1 SessionStart hook in $ch_settings${b:+ (backup: $b)}"
+  logf "  $1 ${3:-SessionStart} hook in $ch_settings${b:+ (backup: $b)}"
   ok "done${b:+ (backup: ${b/#$HOME/\~})}"
 }
 label_claude_hook() { echo "Claude start hook"; }
@@ -1288,6 +1292,20 @@ state_claude_hook() { NOTE=""
 install_claude_hook() { ch_json has 2>/dev/null && { ok "already there"; return; }
   ask "Add the start hook to ${ch_settings/#$HOME/\~}? (runs ${C}ctx plain${R} when a session opens)" && { dry || ch_write add; } || skip; }
 uninstall_claude_hook() { ch_json has 2>/dev/null || { ok "not there"; return 0; }; ch_write remove; }
+
+# The guard (claude/guard.sh, through tk): before each Bash command, has you approve
+# one that changes something on PROD or leans on an inherited PROD profile/context.
+cgd_cmd="tk __guard"
+cgd_json() { ch_json "$1" "$cgd_cmd" PreToolUse Bash; }
+label_claude_guard() { echo "Claude PROD guard"; }
+title_claude_guard() { echo "Claude Code asks you first before changing anything on PROD"; }
+detail_claude_guard() { echo "a PreToolUse hook for Bash in ${ch_settings/#$HOME/\~} that runs: $cgd_cmd"; }
+state_claude_guard() { NOTE=""
+  command -v claude >/dev/null || [[ -d "$claude_dir" ]] || { STATE=n/a; NOTE="Claude Code isn't installed"; return; }
+  if cgd_json has 2>/dev/null; then STATE=installed; else STATE=missing; fi; }
+install_claude_guard() { cgd_json has 2>/dev/null && { ok "already there"; return; }
+  ask "Add the PROD guard to ${ch_settings/#$HOME/\~}? (Claude asks you before a command that changes PROD)" && { dry || ch_write add "$cgd_cmd" PreToolUse Bash; } || skip; }
+uninstall_claude_guard() { cgd_json has 2>/dev/null || { ok "not there"; return 0; }; ch_write remove "$cgd_cmd" PreToolUse Bash; }
 
 # The coding guidelines (claude/guidelines/karpathy.md, a vendored copy; refresh
 # it with `tk guidelines refresh`) live in the user-level CLAUDE.md as one block

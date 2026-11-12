@@ -286,7 +286,7 @@ yaml_q() { local s=${1//\\/\\\\}; printf '"%s"' "${s//\"/\\\"}"; }
 # (so a per-shell namespace overrides the one in ~/.kube/config).
 write_overlay() {
   local name="$1" cluster="$2" user="$3" ns="$4" tmp
-  mkdir -p "$(dirname "$SHELL_FILE")" && chmod 700 "$(dirname "$SHELL_FILE")"
+  [[ -d "$(dirname "$SHELL_FILE")" ]] || { mkdir -p "$(dirname "$SHELL_FILE")" && chmod 700 "$(dirname "$SHELL_FILE")"; }
   tmp=$(umask 077; mktemp "$SHELL_FILE.XXXX") || die "Cannot write $SHELL_FILE"
   {
     printf 'apiVersion: v1\nkind: Config\npreferences: {}\n'
@@ -877,11 +877,14 @@ cmd_sync() {
 
 cmd_exec() {
   [[ $# -ge 1 ]] || die "Usage: kx exec <context> -- <command...>"
-  local name="$1" row cluster user ns tmp; shift
+  local name="$1" row cluster user ns prof tmp; shift
   [[ "${1:-}" == "--" ]] && shift
   [[ $# -ge 1 ]] || die "Usage: kx exec <context> -- <command...>"
   row=$(ctx_row "$name") || die "No context named '$name'."
-  IFS=$S read -r _ cluster user ns _ _ _ _ <<<"$row"
+  IFS=$S read -r _ cluster user ns prof _ _ _ <<<"$row"
+  if [[ -n "$prof" ]] && has_okcli && ! profile_fresh "$prof"; then
+    die "AWS session for '$prof' (used by $name) expired. Refresh it in a terminal: okcli refresh $prof"
+  fi
   tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/kx-exec.XXXXXX.yaml")
   SHELL_FILE="$tmp" UI_EVAL_FILE=/dev/null write_overlay "$name" "$cluster" "$user" "$ns"
   KUBECONFIG="$tmp:$BASE" "$@"; local rc=$?

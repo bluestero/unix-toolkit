@@ -38,7 +38,7 @@ EOF
   *) ui_unknown ctx "$1" ;;
 esac
 
-I_AWS=$'\U000F0163' I_K8S=$'\U000F10FE' I_NET=$'\U000F0582' I_PIN=$'\U000F0403'
+I_AWS=$'\U000F0163' I_K8S=$'\U000F10FE' I_NET=$'\U000F0582' I_PIN=$'\U000F0403' I_GH=$'\uF09B' I_AI=$'\U000F06A9'
 
 has() { command -v "$1" >/dev/null; }
 dim() { printf '%s%s%s' "$C_DIM" "$1" "$C_RESET"; }
@@ -92,6 +92,24 @@ envrc="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.envrc"
 pin=""
 [[ -r "$envrc" ]] && pin=$(sed -n 's/^export AWS_PROFILE=\([^ ]*\).*/\1/p' "$envrc" | tail -n1)
 
+# hat: the folder's GitHub account (does git's email match it, is gh signed in as
+# it) and Claude profile. gh_state: ok, other (signed in, not the active one), none.
+# shellcheck source=../lib/hat.sh
+. "$ROOT/lib/hat.sh"
+here=$(realpath -m .)
+IFS=$'\t' read -r gh_acct gh_from < <(hat_github_get "$here")
+[[ ${gh_acct:-} == *@* ]] && gh_acct=""   # a repo's own email, no account behind it
+git_email=$(git rev-parse --git-dir >/dev/null 2>&1 && git config user.email)
+gh_active=$(has gh && hat_gh_active) gh_state="" email_bad=0
+if [[ -n $gh_acct ]] && has gh; then
+  if [[ $gh_active == "$gh_acct" ]]; then gh_state=ok
+  elif hat_gh_signed_in "$gh_acct"; then gh_state=other
+  else gh_state=none; fi
+fi
+[[ -n $gh_acct && -n $git_email && $git_email != "$(hat_gh_email "$gh_acct")" ]] && email_bad=1
+IFS=$'\t' read -r cl_dir cl_from < <(hat_envrc_get "$here" CLAUDE_CONFIG_DIR)
+cl_prof=${cl_dir:+$(basename "$cl_dir")}
+
 # ------------------------------------------------- prod flag (box label) ---
 prod=()
 [[ -n "$aws_p" ]] && is_prod "$aws_p $aws_acct" && prod+=(AWS)
@@ -122,6 +140,22 @@ if (( PLAIN )); then
     conn=$(twingate status -d 2>/dev/null | head -n1); node=$(has twin && twin __current 2>/dev/null)
     echo "Twingate: ${node:-direct}, ${conn:-unknown} (whole machine)"
   fi
+  if [[ -n $gh_acct ]]; then
+    line="GitHub: $gh_acct (hat, ${gh_from/#$HOME/\~})"
+    if [[ -n $git_email ]]; then
+      if (( email_bad )); then line+="; git email $git_email does NOT match its $(hat_gh_email "$gh_acct")"
+      else line+="; git email matches"; fi
+    fi
+    case $gh_state in
+      ok) line+="; gh is signed in as it" ;;
+      other) line+="; gh's active account is ${gh_active:-none}: run gh as hat exec -- gh ..." ;;
+      none) line+="; gh has NO sign-in for $gh_acct (its active account is ${gh_active:-none}): ask the user to run hat github login $gh_acct" ;;
+    esac
+    echo "$line"
+  else
+    echo "GitHub: no hat here${git_email:+; git commits as $git_email}${gh_active:+; gh signed in as $gh_active}"
+  fi
+  [[ -n $cl_prof ]] && echo "Claude profile: $cl_prof (hat, ${cl_from/#$HOME/\~})"
   exit 0
 fi
 
@@ -155,6 +189,18 @@ table=$(
     row "$I_NET Twingate" "$n" "$(dim same)" "$c" "$det"
   fi
 
+  # GitHub and Claude come from the folder (hat), whatever the terminal
+  if [[ -n $gh_acct ]]; then
+    if (( email_bad )); then st="${C_RED}git email differs$C_RESET"
+    elif [[ $gh_state == none ]]; then st="${C_YELLOW}gh not signed in$C_RESET"
+    elif [[ $gh_state == other ]]; then st="${C_YELLOW}gh uses $gh_active$C_RESET"
+    else st="${C_GREEN}ready$C_RESET"; fi
+    row "$I_GH GitHub" "$C_BOLD$gh_acct$C_RESET" "$(none)" "$st" "hat: ${gh_from/#$HOME/\~}"
+  elif [[ -n $(hat_github_accounts) ]]; then
+    row "$I_GH GitHub" "$(none none)" "$(none)" "$(none)" "${git_email:-no hat here}"
+  fi
+  [[ -n $cl_prof ]] && row "$I_AI Claude" "$C_BOLD$cl_prof$C_RESET" "$(none)" "$(none)" "hat: ${cl_from/#$HOME/\~}"
+
   if [[ -n "$pin" ]]; then
     row "$I_PIN Folder pin" "$(named "$pin")" "$(none)" "AWS here" "${envrc/#$HOME/\~}"
   fi
@@ -163,6 +209,7 @@ table=$(
 if [[ -t 1 ]]; then
   # one fix for every expired session, in the bottom border
   foot=""; [[ "$(strip_ansi "$table")" == *expired* ]] && foot="${C_RED}expired${C_RESET} $(ui_hint 'okcli refresh')"
+  [[ $gh_state == none ]] && foot+="${foot:+  }${C_YELLOW}gh not signed in${C_RESET} $(ui_hint "hat github login $gh_acct")"
   print_table 3 <<<"$table" | ui_box ctx "$flag" 1 "$foot"
 else  # piped: plain table, no box, so it greps and diffs cleanly
   (( ${#prod[@]} )) && printf 'PROD: %s\n' "${prod[*]}"

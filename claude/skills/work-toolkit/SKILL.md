@@ -13,7 +13,7 @@ Different repos need different access levels, so get this right before touching 
 ## First: where am I pointing?
 
 ```bash
-ctx plain        # AWS profile (+ PROD flag, session time left), repo pin, kube context, Twingate
+ctx plain        # AWS profile (+ PROD flag, session time left), repo pin, kube context, Twingate, GitHub
 ```
 
 A session-start hook already put this in your context once. Run it again after you `cd` to
@@ -31,17 +31,28 @@ So don't trust the inherited environment. Name the profile or context on each co
 | Do this | Instead of |
 |---|---|
 | `okcli exec <profile> -- aws s3 ls` | `aws s3 ls` |
-| `direnv exec . aws s3 ls` (uses the folder's pin) | `aws ...` after a `cd` |
+| `hat exec -- aws s3 ls` (uses the folder's pin) | `aws ...` after a `cd` |
 | `kx exec <context> -- kubectl get pods -n <ns>` | `kubectl get pods` |
 | `kubectl --context <context> -n <ns> ...` | relying on the current context |
 
 The pin, when there is one, is the profile the user meant for that repo. Use it.
+To look around, pick the account's read-only profile (`*-ro`, `*-read`); an admin or team
+role only when the job needs it.
+
+A guard hook runs before your Bash commands: it has the user approve a command that changes
+something on PROD, or a bare `aws`/`kubectl` while the inherited profile or context is PROD.
+When it asks, that's expected: say what the command will do and on which account. Its notes
+(`work-toolkit guard: ...`) also warn when a session is about to run out.
 
 ## Which GitHub account and Claude profile (hat)
 
 `hat show` (in a folder) says which Claude profile, GitHub account and AWS profile it uses and
-where from; `hat ls` lists every folder that has one. Before committing or pushing, check
-`git config user.email` matches the account `hat show` names. Changing a folder's hat
+where from; `hat ls` lists every folder that has one. `ctx plain` has a GitHub line: the
+folder's account, whether git's email matches it, and whether `gh` is signed in as it.
+`gh` itself ignores the folder and uses its own active account, so run it as
+`hat exec -- gh pr create ...`: that gives `gh` the folder's account (and the folder's AWS
+pin). If `ctx plain` says `gh has NO sign-in` for the account, ask the user to run
+`! hat github login <account>` (browser) instead of using `gh` as the wrong account. Changing a folder's hat
 (`hat set`, `hat off`) or adding/removing accounts edits ~/.gitconfig and .envrc files: only
 when the user asks.
 
@@ -53,6 +64,7 @@ when the user asks.
 | `okcli current` / `okcli status` / `okcli ls` | profile in use; all profiles with account, role, session |
 | `okcli whoami [profile]` | asks AWS who you are (account + role ARN) |
 | `kx current` / `kx status` / `kx ls` | context in use; all contexts, namespaces, which profile they sign in with |
+| `kx exec <ctx> -- kx pods -n <ns>` (also `why <pod>`, `deploys`, `get <kind>`, `events`, `top`) | pods, why one is unhealthy, deployments, anything else; plain tables when there's no terminal. For logs use `kubectl logs --tail=200` (`kx logs` follows and never ends) |
 | `twin current` / `twin status` | Twingate exit node (machine-wide) |
 | `tk doctor` | every setup check |
 
@@ -62,8 +74,10 @@ when the user asks.
 - `okcli pin` / `okcli unpin`: writes the repo's `.envrc`.
 - `okcli default`, `kx default`: changes what *all* new terminals start on. Never do this on your own.
 - `twin <code>` / `twin off`: moves the whole machine's network.
+- `kx restart`, `kx shell`, `kx forward` (changes, or opens a session), and `kx secrets` (shows secret values).
 - `okcli refresh` and `okcli sync` open a browser for Okta sign-in. You can't complete that.
   When a session says `expired`, ask the user to run `! okcli refresh <profile>`.
+  `okcli exec`, `kx exec` and `hat exec` stop at once on an expired session and say so.
 
 ## Don't use (they're interactive pickers or per-terminal switches)
 

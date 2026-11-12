@@ -351,6 +351,7 @@ case "${1:-}" in
   layer|layers)   shift; cmd_layer "$@" ;;
   guidelines)     shift; cmd_guidelines "$@" ;;
   version|-v|--version) cmd_version ;;
+  __guard)        exec "$ROOT/claude/guard.sh" ;;   # Claude Code's PreToolUse hook (claude-guard)
   help|-h|--help) cmd_help ;;
   *)              ui_unknown tk "$1" ;;
 esac

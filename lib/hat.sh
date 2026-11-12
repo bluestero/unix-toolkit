@@ -29,6 +29,24 @@ hat_aws_profiles() {
 }
 hat_gh_email() { git config -f "$HAT_GH/$1.gitconfig" user.email 2>/dev/null; }
 
+# gh's own sign-ins (the gh CLI keeps its own, apart from git's keys), read from its
+# hosts.yml: gh auth status goes over the network.
+#   hat_gh_active        the account gh uses unless told otherwise
+#   hat_gh_users         every account gh is signed in as, one per line
+#   hat_gh_signed_in <a> gh has a sign-in for <a>
+hat_gh_hosts() { printf '%s' "${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh}/hosts.yml"; }
+hat_gh_active() {
+  [[ -r $(hat_gh_hosts) ]] || return 0
+  awk '/^github.com:/ { h = 1; next } /^[^ ]/ { h = 0 } h && /^    user:/ { print $2 }' "$(hat_gh_hosts)"
+}
+hat_gh_users() {
+  local u
+  [[ -r $(hat_gh_hosts) ]] || return 0
+  u=$(awk '/^github.com:/ { h = 1; next } /^[^ ]/ { h = 0 } h && /^        [^ ].*:$/ { gsub(/[ :]/, ""); print }' "$(hat_gh_hosts)")
+  printf '%s\n' "${u:-$(hat_gh_active)}"
+}
+hat_gh_signed_in() { grep -qx -- "$1" < <(hat_gh_users); }
+
 # The value an .envrc gives VAR in <dir>: <value><TAB><folder it's set in>.
 # direnv loads the nearest .envrc only, so the walk up goes on only through
 # .envrc files that source their parents (source_up...).
