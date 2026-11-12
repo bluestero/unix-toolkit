@@ -75,10 +75,32 @@ component_unsupported() {
   done
   return 0
 }
-# component_state <id>: sets STATE and NOTE (unsupported here, else the component's own check)
+# Parts that need another part set up first (a layer adds its own: NEEDS[id]=...).
+# One whose needs aren't set up yet is "needs" and can still be picked: picking it
+# picks what it needs too (lib/tabs.sh), and the run sets that up first (install.sh).
+declare -A NEEDS=([kitty-config]=kitty [kitty-nautilus]=kitty [login-shell]=zsh [yazi-keys]=yazi
+  [eks-clusters]="kubectl aws-cli")
+# component_state <id>: sets STATE and NOTE (unsupported here, else the component's own
+# check), and NEED: the parts it needs that aren't set up yet (STATE=needs).
 component_state() {
-  local why; why=$(component_unsupported "$1")
-  if [[ -n $why ]]; then STATE=unsupported NOTE=$why; else "$(fn state "$1")"; fi
+  local why d st nt need=""
+  why=$(component_unsupported "$1")
+  if [[ -n $why ]]; then STATE=unsupported NOTE=$why NEED=""; return; fi
+  "$(fn state "$1")"
+  NEED=""
+  [[ $STATE == n/a && -n ${NEEDS[$1]:-} ]] || return 0
+  st=$STATE nt=$NOTE
+  for d in ${NEEDS[$1]}; do
+    component_state "$d"
+    case $STATE in
+      installed) ;;
+      unsupported) STATE=unsupported NOTE="needs $d, which can't run here: $NOTE" NEED=""; return ;;
+      n/a) STATE=n/a NOTE="needs $d, which $NOTE" NEED=""; return ;;
+      *) need+="${need:+ }$d" ;;
+    esac
+  done
+  if [[ -n $need ]]; then STATE=needs NOTE="needs ${need// / and }: picking it picks that too" NEED=$need
+  else STATE=$st NOTE=$nt NEED=""; fi
 }
 
 fn() { printf '%s_%s' "$1" "${2//-/_}"; }
@@ -275,7 +297,7 @@ title_kitty() { echo "The kitty terminal itself, latest release (Ubuntu's is yea
 detail_kitty() { echo "official build in ~/.local/kitty.app, kitty/kitten in ~/.local/bin, app menu entry; apt kitty kept as a fallback"; }
 state_kitty() {
   NOTE=""
-  [[ -n "$(kapp_arch)" ]] || { STATE=n/a; NOTE="no build for $(uname -m)"; return; }
+  [[ -n "$(kapp_arch)" ]] || { STATE=unsupported; NOTE="no kitty build for $(uname -m)"; return; }
   local v; v=$(kapp_ver)
   if [[ -z "$v" ]]; then
     STATE=missing
@@ -552,7 +574,8 @@ label_kitty_nautilus() { echo "Kitty in Files"; }
 title_kitty_nautilus() { echo "Make kitty the default terminal and add \"Open in Terminal\" to Files"; }
 detail_kitty_nautilus() { echo "kitty as default terminal, 'Open in Terminal' in Files"; }
 state_kitty_nautilus() { NOTE=""
-  type -P kitty >/dev/null && type -P nautilus >/dev/null || { STATE=n/a; NOTE="needs kitty and nautilus"; return; }
+  type -P nautilus >/dev/null || { STATE=unsupported; NOTE="needs Nautilus (GNOME Files)"; return; }
+  type -P kitty >/dev/null || { STATE=n/a; NOTE="kitty isn't installed"; return; }
   local n=0
   [[ -f "$nat_ext" ]] && (( n++ ))
   [[ "$(gsettings get "$nat_schema" terminal 2>/dev/null)" == "'kitty'" ]] && (( n++ ))
@@ -732,7 +755,7 @@ title_window_calls() { echo "Let ws close and focus editor windows (GNOME extens
 detail_window_calls() { echo "GNOME extension $wc_uuid from extensions.gnome.org into ~/.local/share/gnome-shell/extensions"; }
 state_window_calls() {
   NOTE=""
-  type -P gnome-shell >/dev/null || { STATE=n/a; NOTE="needs GNOME"; return; }
+  type -P gnome-shell >/dev/null || { STATE=unsupported; NOTE="needs GNOME"; return; }
   if wc_present && wc_enabled; then
     if wc_live; then STATE=installed; else STATE=partial; NOTE="log out and back in to load it"; fi
   elif wc_present; then STATE=partial; NOTE="installed, not enabled"
@@ -813,7 +836,7 @@ label_alt_tab_desktop() { echo "Alt+Tab after Show Desktop"; }
 title_alt_tab_desktop() { echo "After Super+D, Alt+Tab returns to the window you minimized (GNOME extension; log out once)"; }
 detail_alt_tab_desktop() { echo "~/.local/share/gnome-shell/extensions/$atd_uuid -> gnome/$atd_uuid, added to enabled extensions"; }
 state_alt_tab_desktop() { NOTE=""
-  type -P gnome-shell >/dev/null || { STATE=n/a; NOTE="needs GNOME"; return; }
+  type -P gnome-shell >/dev/null || { STATE=unsupported; NOTE="needs GNOME"; return; }
   if linked "$atd_dir" "$atd_src" && atd_enabled; then STATE=installed
   elif linked "$atd_dir" "$atd_src" || atd_enabled; then STATE=partial
   else STATE=missing; fi; }
@@ -840,7 +863,7 @@ label_hide_docker_tray() { echo "Hide Docker's tray dots"; }
 title_hide_docker_tray() { echo "hides Docker Desktop's dead three-dots tray icon (GNOME extension; log out once)"; }
 detail_hide_docker_tray() { echo "~/.local/share/gnome-shell/extensions/$hdt_uuid -> gnome/$hdt_uuid, added to enabled extensions"; }
 state_hide_docker_tray() { NOTE=""
-  type -P gnome-shell >/dev/null || { STATE=n/a; NOTE="needs GNOME"; return; }
+  type -P gnome-shell >/dev/null || { STATE=unsupported; NOTE="needs GNOME"; return; }
   if linked "$hdt_dir" "$hdt_src" && hdt_enabled; then STATE=installed
   elif linked "$hdt_dir" "$hdt_src" || hdt_enabled; then STATE=partial
   else STATE=missing; fi; }
@@ -885,7 +908,7 @@ label_rofi() { echo "Rofi launcher"; }
 title_rofi() { echo "Alt+Space opens an app launcher (Alt+Shift+Space ssh, Super+X power menu, Super+S speaker/mic/wifi/bluetooth), styled like kitty"; }
 detail_rofi() { echo "rofi (apt) if missing; ~/.config/rofi/config.rasi -> rofi/config.rasi; four GNOME shortcuts (Alt+Space, Alt+Shift+Space, Super+X, Super+S); launcher icon (rofi/rofi-icon.png) in the app list and dock"; }
 state_rofi() { NOTE=""
-  type -P gsettings >/dev/null || { STATE=n/a; NOTE="needs GNOME"; return; }
+  type -P gsettings >/dev/null || { STATE=unsupported; NOTE="needs GNOME"; return; }
   local n=0
   type -P rofi >/dev/null && (( n++ ))
   linked "$rofi_conf" "$rofi_src" && (( n++ ))
@@ -942,7 +965,7 @@ label_app_keys() { echo "Super+number app keys"; }
 title_app_keys() { echo "Super+1..9 launches, raises or minimizes the Nth dock app (needs Window Calls; replaces GNOME's own)"; }
 detail_app_keys() { echo "nine GNOME shortcuts (Super+1..9) running bin/k-appkey; GNOME's switch-to-application keys turned off (put back by the uninstall)"; }
 state_app_keys() { NOTE=""
-  type -P gsettings >/dev/null || { STATE=n/a; NOTE="needs GNOME"; return; }
+  type -P gsettings >/dev/null || { STATE=unsupported; NOTE="needs GNOME"; return; }
   if ak_keys_on && ak_native_off; then STATE=installed
   elif ak_keys_on || ak_native_off; then STATE=partial
   else STATE=missing; fi; }
@@ -1242,7 +1265,7 @@ label_claude_skill() { echo "Claude skill"; }
 title_claude_skill() { echo "Claude Code knows okcli, kx, ctx and the rest, in every repo"; }
 detail_claude_skill() { echo "${claude_dir/#$HOME/\~}/skills/<name> links to claude/skills/<name> (and each layer's)"; }
 state_claude_skill() { local l t n=0 all=0; NOTE=""
-  type -P claude >/dev/null || [[ -d "$claude_dir" ]] || { STATE=n/a; NOTE="Claude Code isn't installed"; return; }
+  type -P claude >/dev/null || [[ -d "$claude_dir" ]] || { STATE=n/a; NOTE="needs Claude Code"; return; }
   while IFS=$'\t' read -r l t; do (( all++ )); linked "$l" "$t" && (( n++ )); done < <(cs_pairs)
   if (( n == all )); then STATE=installed; elif (( n )); then STATE=partial; NOTE="$n of $all skills linked"; else STATE=missing; fi; }
 install_claude_skill() { local l t
@@ -1287,7 +1310,7 @@ label_claude_hook() { echo "Claude start hook"; }
 title_claude_hook() { echo "Every Claude Code session starts knowing your AWS profile, pin and cluster"; }
 detail_claude_hook() { echo "a SessionStart hook in ${ch_settings/#$HOME/\~} that runs: $ch_cmd"; }
 state_claude_hook() { NOTE=""
-  type -P claude >/dev/null || [[ -d "$claude_dir" ]] || { STATE=n/a; NOTE="Claude Code isn't installed"; return; }
+  type -P claude >/dev/null || [[ -d "$claude_dir" ]] || { STATE=n/a; NOTE="needs Claude Code"; return; }
   if ch_json has 2>/dev/null; then STATE=installed; else STATE=missing; fi; }
 install_claude_hook() { ch_json has 2>/dev/null && { ok "already there"; return; }
   ask "Add the start hook to ${ch_settings/#$HOME/\~}? (runs ${C}ctx plain${R} when a session opens)" && { dry || ch_write add; } || skip; }
@@ -1301,7 +1324,7 @@ label_claude_guard() { echo "Claude PROD guard"; }
 title_claude_guard() { echo "Claude Code asks you first before changing anything on PROD"; }
 detail_claude_guard() { echo "a PreToolUse hook for Bash in ${ch_settings/#$HOME/\~} that runs: $cgd_cmd"; }
 state_claude_guard() { NOTE=""
-  type -P claude >/dev/null || [[ -d "$claude_dir" ]] || { STATE=n/a; NOTE="Claude Code isn't installed"; return; }
+  type -P claude >/dev/null || [[ -d "$claude_dir" ]] || { STATE=n/a; NOTE="needs Claude Code"; return; }
   if cgd_json has 2>/dev/null; then STATE=installed; else STATE=missing; fi; }
 install_claude_guard() { cgd_json has 2>/dev/null && { ok "already there"; return; }
   ask "Add the PROD guard to ${ch_settings/#$HOME/\~}? (Claude asks you before a command that changes PROD)" && { dry || ch_write add "$cgd_cmd" PreToolUse Bash; } || skip; }
@@ -1356,7 +1379,7 @@ label_claude_guidelines() { echo "Claude guidelines & skills"; }
 title_claude_guidelines() { echo "Pick coding guidelines and skills for Claude Code (Karpathy, Superpowers, Anthropic, Trail of Bits)"; }
 detail_claude_guidelines() { echo "Claude Code plugins from their authors' GitHub repos, for every project; claude plugin update keeps them current"; }
 state_claude_guidelines() { local l id names=""; NOTE=""
-  type -P claude >/dev/null || [[ -d "$claude_dir" ]] || { STATE=n/a; NOTE="Claude Code isn't installed"; return; }
+  type -P claude >/dev/null || [[ -d "$claude_dir" ]] || { STATE=n/a; NOTE="needs Claude Code"; return; }
   for l in "${CP_CATALOG[@]}"; do id=${l%%|*}; cp_has "$id" && names+="${names:+, }$(cut -d'|' -f3 <<<"$l")"; done
   if cg_present; then STATE=partial; NOTE="an old copy in CLAUDE.md; the Karpathy plugin replaces it"
   elif [[ -n $names ]]; then STATE=installed; NOTE=$names
@@ -1378,8 +1401,11 @@ install_claude_guidelines() {
     cp_has "$id" && { ok "$name: already installed"; continue; }
     ask "Install $name? (Claude Code plugin from github.com/$repo)" || { skip; continue; }
     dry && continue
-    cp_mkt "${id#*@}" || claude plugin marketplace add "$repo" >>"$log_file" 2>&1 ||
-      { fail "couldn't add github.com/$repo to Claude Code (see the log)"; continue; }
+    if ! cp_mkt "${id#*@}"; then   # added by us: the uninstall removes it again
+      claude plugin marketplace add "$repo" >>"$log_file" 2>&1 ||
+        { fail "couldn't add github.com/$repo to Claude Code (see the log)"; continue; }
+      remember_setting "claude-marketplace-${id#*@}" added
+    fi
     if claude plugin install "$id" >>"$log_file" 2>&1; then ok "$name installed"
     else fail "$name not installed (see the log)"; fi
   done <<<"$picked"
@@ -1395,6 +1421,15 @@ uninstall_claude_guidelines() { local l id n=0
     else fail "couldn't remove $(cut -d'|' -f3 <<<"$l") (see the log)"; fi
   done
   cg_present && { (( n++ )); cg_remove; }
+  # the plugin sources the toolkit added, once no plugin from them is left
+  for l in $(printf '%s\n' "${CP_CATALOG[@]}" | cut -d'|' -f1 | sed 's/.*@//' | sort -u); do
+    [[ $(recall_setting "claude-marketplace-$l") == added ]] || continue
+    grep -qF "@$l\":" "$claude_dir/plugins/installed_plugins.json" 2>/dev/null && continue
+    (( n++ ))
+    if ! cp_mkt "$l" || claude plugin marketplace remove "$l" >>"$log_file" 2>&1; then
+      forget_setting "claude-marketplace-$l"; ok "removed the $l plugin source"
+    else fail "couldn't remove the $l plugin source (see the log)"; fi
+  done
   (( n )) || ok "not there"; }
 
 # -------------------------------------------------------------- layers ---

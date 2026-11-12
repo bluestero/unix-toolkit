@@ -17,12 +17,12 @@
 # plus lib/inplace.sh's files (the overlap question asks in the list's header).
 
 # tabs_pick: shows wanted (all) with todo tickable; sets todo to the ticked ones.
-# 1 = cancelled. Needs install.sh's wanted, todo, ST/NT (state and note per id), again, undo, layer.
+# 1 = cancelled. Needs install.sh's wanted, todo, ST/NT/ND (state, note, needs per id), again, undo, layer.
 tabs_pick() {
   local T id g bg rc=0 on
   local -a picked=()
   T=$(mktemp -d) || return 1
-  mkdir "$T/dry"; : >"$T/tabs"; : >"$T/about"; : >"$T/info"; : >"$T/on"; echo 0 >"$T/cur"
+  mkdir "$T/dry"; : >"$T/tabs"; : >"$T/about"; : >"$T/info"; : >"$T/on"; : >"$T/needs"; echo 0 >"$T/cur"
   printf '%s\t%s\n' "$again" "$undo" >"$T/cmds"
   local c a b
   for c in "${CLASHES[@]}"; do
@@ -33,7 +33,8 @@ tabs_pick() {
     g=$(group_of "$id")
     grep -qxF "$g" "$T/tabs" || { echo "$g" >>"$T/tabs"; printf '%s\x1e%s\n' "$g" "${GROUP_ABOUT[$g]:-}" >>"$T/about"; }
     on=0; [[ " ${todo[*]} " == *" $id "* ]] && on=1   # can be ticked; nothing starts ticked
-    printf '%s\x1e' "$id" "$g" "$on" "${ST[$id]}" "$(badge "${ST[$id]}")" "$("$(fn label "$id")")" \
+    [[ ${ST[$id]} == needs ]] && printf '%s\t%s\n' "$id" "${ND[$id]}" >>"$T/needs"   # ticking it ticks these
+    printf '%s\x1e' "$id" "$g" "$on" "${ST[$id]}" "$(badge "${ST[$id]}" "${ND[$id]}" "${NT[$id]}")" "$("$(fn label "$id")")" \
       "$("$(fn title "$id")")" "$("$(fn detail "$id")")" >>"$T/info"
     printf '%s\n' "${NT[$id]}" >>"$T/info"
   done
@@ -158,11 +159,24 @@ t_go() {
   if (( $1 )); then t_reload; else t_reload "pos(${FZF_POS:-1})"; fi
 }
 
+# A part ticks the parts it needs ($T/needs: "<id>\t<needs>"); unticking one unticks what needs it.
+t_tick_with_needs() {
+  local d
+  t_on "$1" || echo "$1" >>"$T/on"
+  for d in $(awk -F '\t' -v i="$1" '$1 == i { print $2 }' "$T/needs"); do t_tick_with_needs "$d"; done
+}
+t_untick() {
+  local i
+  grep -vxF "$1" "$T/on" >"$T/on.new"; mv "$T/on.new" "$T/on"
+  for i in $(awk -F '\t' -v d="$1" '{ n = split($2, a, " "); for (k = 1; k <= n; k++) if (a[k] == d) print $1 }' "$T/needs"); do
+    t_on "$i" && t_untick "$i"
+  done
+}
 # tick <id> <row index>: on a tab, tick or untick that row
 t_tick() {
   [[ $(ip_get mode) == confirm ]] && return 0
   (( CUR < NT )) && t_info "${1:-}" && (( I_TICK )) || return 0
-  if t_on "$1"; then grep -vxF "$1" "$T/on" >"$T/on.new"; mv "$T/on.new" "$T/on"; else echo "$1" >>"$T/on"; fi
+  if t_on "$1"; then t_untick "$1"; else t_tick_with_needs "$1"; fi
   t_reload "pos($(( $2 + 1 )))"
 }
 

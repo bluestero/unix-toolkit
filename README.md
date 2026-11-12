@@ -158,7 +158,9 @@ fk uninstall                                                 # removes its parts
 
 The installer opens on a tab per group (Recommended, Kitty, Optional, Desktop, Cloud, Workspaces,
 Claude Code, then each layer's own; a standalone layer such as feelkit has its own: `fk install`). A tab says in one line what the group is, then lists its parts
-with their state (installed, partly, not installed, not supported here) and what each gets you; the
+with their state (installed, partly, not installed, needs <part>, not supported here) and what each gets you;
+a part that needs another one (yazi-keys needs yazi) can still be ticked: ticking it ticks that one too,
+and the run sets it up first. Not supported here means this machine can't run it (no GNOME, say); the
 footer shows what the part under the cursor touches on disk. ←/→ change tabs, Tab ticks,
 Enter goes to the **Summary** tab: everything that will be set up, with what `--dry-run` prints for the
 part under the cursor. Enter there sets it up; Esc anywhere leaves with nothing changed. Parts that

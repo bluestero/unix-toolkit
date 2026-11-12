@@ -88,7 +88,7 @@ toolkit_state() {
       n=0 total=0 left=""
       for id in "$@"; do
         "$(fn state "$id")" >/dev/null 2>&1
-        [[ "$STATE" == n/a ]] && continue
+        [[ "$STATE" == n/a || "$STATE" == unsupported ]] && continue
         total=$((total + 1))
         if [[ "$STATE" == installed ]]; then n=$((n + 1)); else left+="$id "; fi
       done

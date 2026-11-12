@@ -23,6 +23,8 @@ for arg in "$@"; do
 done
 
 setup_phase=install   # lets lib/setup.sh keep your originals (see "originals" there)
+# downloads go in ~/.local/bin: a part set up in this run is found by the ones that need it
+[[ ":$PATH:" == *":$HOME/.local/bin:"* ]] || PATH="$HOME/.local/bin:$PATH"
 . "$repo/lib/setup.sh"
 . "$repo/lib/components.sh"
 . "$repo/lib/tabs.sh"
@@ -72,13 +74,14 @@ if [[ "$mode" == ask && $list == 0 && ! -t 0 ]]; then
   exit 1
 fi
 
-badge() {
+badge() {   # badge <state> [what it needs] [note]
   case "$1" in
     installed) printf '%s✓ installed%s' "$G" "$R" ;;
     partial)   printf '%s◐ partly%s' "$Y" "$R" ;;
     missing)   printf '%s○ not installed%s' "$Y" "$R" ;;
+    needs)     printf '%s○ needs %s%s' "$Y" "${2// /, }" "$R" ;;
     unsupported) printf '%s⊘ not supported here%s' "$D" "$R" ;;
-    *)         printf '%s– n/a%s' "$D" "$R" ;;
+    *) if [[ ${3:-} == "needs "* ]]; then printf '%s– %s%s' "$D" "${3%%,*}" "$R"; else printf '%s– n/a%s' "$D" "$R"; fi ;;
   esac
 }
 
@@ -88,21 +91,19 @@ todo=() prev="" table=""
 if (( list )); then table+="${B}COMPONENT${R}"$'\x1f'"${B}KIT${R}"$'\x1f'"${B}STATE${R}"$'\x1f'"${B}NOTE${R}"$'\n'
 else table+="${B}COMPONENT${R}"$'\x1f'"${B}STATE${R}"$'\x1f'"${B}NOTE${R}"$'\n'; fi
 skipped=0
-declare -A ST=() NT=()   # each one's state and note, for the tabs
+declare -A ST=() NT=() ND=()   # each one's state, note and the parts it needs first, for the tabs
 for id in "${wanted[@]}"; do
-  component_state "$id"; ST[$id]=$STATE NT[$id]=$NOTE
+  component_state "$id"; ST[$id]=$STATE NT[$id]=$NOTE ND[$id]=$NEED
   [[ "$STATE" == unsupported ]] && (( skipped++ ))
   if (( ! named )) && [[ "$(group_of "$id")" != "$prev" ]]; then
     [[ -n "$prev" ]] && table+=$'\n'
     prev=$(group_of "$id"); table+="${D}$prev${R}"$'\n'
   fi
-  if (( list )); then table+="  $id"$'\x1f'"$D$(repo_of "$id")$R"$'\x1f'"$(badge "$STATE")"$'\x1f'"$D${NOTE}$R"$'\n'
-  else table+="  $id"$'\x1f'"$(badge "$STATE")"$'\x1f'"$D${NOTE}$R"$'\n'; fi
-  [[ "$STATE" == missing || "$STATE" == partial ]] && todo+=("$id")
+  if (( list )); then table+="  $id"$'\x1f'"$D$(repo_of "$id")$R"$'\x1f'"$(badge "$STATE" "$NEED" "$NOTE")"$'\x1f'"$D${NOTE}$R"$'\n'
+  else table+="  $id"$'\x1f'"$(badge "$STATE" "$NEED" "$NOTE")"$'\x1f'"$D${NOTE}$R"$'\n'; fi
+  [[ "$STATE" == missing || "$STATE" == partial || "$STATE" == needs ]] && todo+=("$id")
   # named on the command line and installed already: still offer its settings menu (keep / look / defaults)
   (( named )) && [[ "$STATE" == installed && " ${LOOK_PARTS[*]} " == *" $id "* ]] && todo+=("$id")
-  # login-shell depends on zsh: if zsh is about to be installed, offer it too
-  [[ "$id" == login-shell && "$STATE" == n/a && " ${todo[*]} " == *" zsh "* ]] && todo+=("$id")
 done
 # Naming only installed look components (their settings menu): no table, heading or summary, just the menu.
 quick=0
@@ -180,9 +181,30 @@ if [[ "$mode" == ask && $named == 0 ]] && (( ! tabs )); then
   say ""
 fi
 
+# What a picked part needs and isn't set up yet joins the run, set up before it (setup order).
+declare -A in_run=()
+for id in "${todo[@]}"; do in_run[$id]=1; done
+more=1
+while (( more )); do
+  more=0
+  for id in "${!in_run[@]}"; do
+    [[ -v ND[$id] ]] || { component_state "$id"; ND[$id]=$NEED; }
+    for need in ${ND[$id]}; do [[ -v in_run[$need] ]] || { in_run[$need]=1; more=1; }; done
+  done
+done
+todo=()
+for id in "${COMPONENTS[@]}"; do [[ -v in_run[$id] ]] && todo+=("$id"); done
+
 for id in "${todo[@]}"; do
   say "${B}$("$(fn label "$id")")${R}  ${D}$id · $("$(fn title "$id")")${R}"
   (( details )) && say "      ${D}$("$(fn detail "$id")")${R}"
+  if [[ -n ${ND[$id]} ]]; then   # it needed other parts: set up now?
+    component_state "$id"
+    if [[ $STATE == needs ]]; then
+      if dry; then say "      ${D}set up right after ${NEED// / and }${R}"; else skip "needs ${NEED// / and }, which isn't set up"; fi
+      continue
+    fi
+  fi
   "$(fn install "$id")"
 done
 
