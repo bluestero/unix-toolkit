@@ -13,7 +13,7 @@ ROOT="$(cd "$(dirname "$SELF")/../.." && pwd)"
 TWIN_VERSION="1.0.0"
 S=$'\x1f'
 
-command -v twingate >/dev/null || die "twingate is not installed."
+ui_need twingate twingate "twin switches it" || die "twingate isn't installed · tk install twingate"
 
 # One row per exit node: code<TAB>name<TAB>time-left<TAB>active(0/1)
 nodes() {

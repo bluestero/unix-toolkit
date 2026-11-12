@@ -147,7 +147,7 @@ cmd_doctor() {
   [[ -t 1 ]] || ui_no_color
   local tool need t n total left bad=0 rows="" p first
   for tool in okcli kx; do type -P "$tool" >/dev/null && from_doctor "$tool"; done
-  if ! type -P twingate >/dev/null; then check twin bad "twingate isn't installed"
+  if ! type -P twingate >/dev/null; then check twin bad "twingate isn't installed" "tk install twingate"
   elif [[ "$(twingate status -d 2>/dev/null | head -n1)" == online ]]; then check twin ok "connected"
   else check twin bad "Twingate isn't connected" "open the Twingate app"; fi
   for t in "${TOOLS[@]}"; do

@@ -219,6 +219,11 @@ feelkit's parts (kitty backgrounds, themes, accents, icons and the GNOME looks) 
 | `aws-cli` | latest AWS CLI v2 from AWS (its own installer) in `~/.local/aws-cli`, `aws` in `~/.local/bin`, for `okcli whoami` and kx's EKS sign-in. Needs unzip |
 | `kubectl` | latest stable kubectl from dl.k8s.io (sha256-checked) in `~/.local/bin`, for `kx` |
 | `eks-clusters` | Runs `kx sync` (after `okcli sync`): tick the AWS accounts, then the EKS clusters you want. Unticked ones go in `~/.config/kx/ignore`. Skipped if you already have contexts. |
+| `twingate` | the Twingate client, for `twin`: Twingate's own installer (adds its apt source; sudo), then `sudo twingate setup` once. `twin` offers it when it isn't installed |
+| `gh` | latest GitHub CLI from GitHub (sha256-checked) in `~/.local/bin`, for `hat`'s GitHub sign-ins. Skipped if you already have one; `hat` offers it when it's missing (in the panel, it installs in the background and goes on to the sign-in) |
+| `clipboard` | apt `wl-clipboard` (`xclip` on X11), so `hat` can copy keys and sign-in codes. Skipped if either is there |
+| `zed` | Zed from its own installer in `~/.local` (no sudo), for `ws`. `ws` offers it when no IDE is installed |
+| `vscode` | VS Code from Microsoft's .deb (apt, sudo; it adds Microsoft's apt source), for `ws` |
 | `repos` | Checks `ssh -T git@github.com`, then clones the repos in your workspace list that are missing: your layers' shared lists plus your own (checklist, all ticked). Creates your list (`~/.config/ws/workspaces`) if needed. Never deletes clones. |
 | `claude-skill` | Links `claude/skills/work-toolkit` (and each layer's skills) into Claude Code's skills (`$CLAUDE_CONFIG_DIR`, else `~/.claude`), so Claude knows okcli, kx, ctx and the rest in every repo: run AWS and kubectl through `okcli exec` / `kx exec` / `direnv exec`, and ask before prod changes or defaults |
 | `claude-hook` | Adds a SessionStart hook to Claude Code's `settings.json` that runs `ctx plain`, so every session starts knowing the AWS profile (and if it's PROD), the repo pin and the cluster. Only that one entry is added or removed; the rest of the file is kept |

@@ -77,7 +77,8 @@ for _f in \
   ws/shell/ws.sh \
   kitty/shell/k-config.sh \
   shell/hat.sh \
-  shell/tk.sh
+  shell/tk.sh \
+  shell/complete.sh
 do
   [ -r "$_work_root/$_f" ] && . "$_work_root/$_f"
 done

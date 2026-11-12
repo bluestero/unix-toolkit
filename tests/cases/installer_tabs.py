@@ -9,7 +9,7 @@ import subprocess
 from fixture import REPO
 from term import Term
 
-TABS = ["Recommended", "Kitty", "Optional", "Desktop (GNOME)", "Cloud", "Workspaces", "Claude Code"]
+TABS = ["Recommended", "Kitty", "Optional", "Desktop (GNOME)", "Cloud", "Apps", "Workspaces", "Claude Code"]
 
 
 def copy(sb):

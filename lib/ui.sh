@@ -92,6 +92,18 @@ ui_ask() {
   fi
 }
 
+# ui_need <command> <installer part> "<what it's for>": true when the command is there.
+# Otherwise asks whether to set that part up now (default yes), runs the installer for
+# just that part (it asks per step), and checks again. For a command outside a list;
+# inside one, ask in its header (ip_confirm) instead.
+UI_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ui_need() {
+  type -P "$1" >/dev/null && return 0
+  confirm "$1 isn't installed ($3). Install it now?" y || return 1
+  "$UI_ROOT/install.sh" "$2" </dev/tty >/dev/tty
+  hash -r; type -P "$1" >/dev/null
+}
+
 # Shell code for the calling shell's wrapper function to source.
 emit_eval() {
   [[ -n "${UI_EVAL_FILE:-}" ]] || return 1
@@ -111,6 +123,14 @@ function vis(s,  w) { s = plain(s); w = gsub(WIDES, "", s) * 2; w += gsub(/[\300
 function ch(s,  c) { c = substr(s, 1, 1); return c ~ /[\300-\337]/ ? 2 : c ~ /[\340-\357]/ ? 3 : c ~ /[\360-\367]/ ? 4 : 1 }
 function chw(c) { return c ~ WIDE ? 2 : 1 }
 function spaces(n) { return n > 0 ? sprintf("%" n "s", "") : "" }
+# a title row in the colour of a sortable one: each title (words split by single spaces)
+function titles(s, on, off,  t, out, p, st) {
+  t = plain(s); out = ""; p = 1
+  while (match(substr(t, p), /[^ ]+( [^ ]+)*/)) {
+    st = p + RSTART - 1; out = out substr(t, p, st - p) on substr(t, st, RLENGTH) off; p = st + RLENGTH
+  }
+  return out substr(t, p)
+}
 # s cut to n columns, ending in … (colours kept up to the cut, then reset)
 function fit(s, n, rs,  out, v, m, c, w) {
   out = ""; v = 0
@@ -135,9 +155,12 @@ function fit(s, n, rs,  out, v, m, c, w) {
 # Anything after a TAB in the last cell is hidden data for fzf and isn't counted.
 # Sortable pickers also set UI_TABLE_FIELD (lay out only that TAB field; the others stay)
 # and UI_TABLE_ORDER (the columns in this order, e.g. 2,1,3).
+# In a picker with a title row and no sorting, ui_fzf sets UI_TABLE_TITLES: the first
+# row then gets the titles' colour (a sortable picker colours its own), callbacks too.
 # One awk pass: a 400-row table takes a few ms at any width.
 print_table() {
   LC_ALL=C awk -v gap="${1:-2}" -v fill="${2:-0}" -v full="${3:-}" -v rs="$C_RESET" \
+      -v tt="${UI_TABLE_TITLES:-}" -v on="$C_CYAN$C_BOLD" \
       -v f="${UI_TABLE_FIELD:-0}" -v order="${UI_TABLE_ORDER:-}" "$_UI_AWK"'
     { L[NR] = $0 }
     END {
@@ -183,6 +206,7 @@ print_table() {
           out = out cell (i < n ? spaces(E[i] - w + gap) : "")
           if (i < n) clip = clip "\036"
         }
+        if (r == 1 && tt != "" && on != "") out = titles(out, on, rs)
         out = out TL[r]
         if (f) { m = split(L[r], F, "\t"); F[f] = out; out = F[1]; for (i = 2; i <= m; i++) out = out "\t" F[i] }
         print out
@@ -777,6 +801,8 @@ ui_fzf() {
   (( phide )) && max=""
   (( lines )) || sortable=0
   ui_fzf_at_least 0.60 || sortable=0
+  local -x UI_TABLE_TITLES=""   # a title row without sorting: coloured like a sortable one's
+  (( lines && ! sortable )) && UI_TABLE_TITLES=1
   if (( lines )); then   # keep the rows (a reload sorts them), laid out once
     in=$(mktemp -d) || return 1
     cat >"$in/raw"; IFS= read -r a <"$in/raw" || a=""
@@ -787,8 +813,17 @@ ui_fzf() {
     (( tab )) && [[ "$nth" =~ ^[0-9]+$ ]] && fa=$(cut -f"$nth" <<<"$a")
     if (( sortable )) && [[ "$fa" == *$'\x1f'* ]]; then
       mv "$in/raw" "$in/cells"   # laid out by ui_sort_layout, again when the window is resized
-    elif [[ "$a" == *$'\x1f'* ]]; then print_table 3 "$(ui_pick_width)" <"$in/raw" >"$in/rows"
+    elif [[ "$fa" == *$'\x1f'* ]]; then   # with TAB fields, only that field is laid out
+      local tf=0; (( tab )) && [[ "$nth" =~ ^[0-9]+$ ]] && tf=$nth
+      UI_TABLE_FIELD=$tf print_table 3 "$(ui_pick_width)" <"$in/raw" >"$in/rows"
     else mv "$in/raw" "$in/rows"; fi
+    # a title row laid out before (twin, a list's own layout) and not coloured yet
+    if [[ -n $UI_TABLE_TITLES && -n $C_CYAN && -f $in/rows ]] && ! head -1 "$in/rows" | grep -q $'\e\['; then
+      local tf=0; (( tab )) && [[ "$nth" =~ ^[0-9]+$ ]] && tf=$nth
+      LC_ALL=C awk -F '\t' -v OFS='\t' -v f="$tf" -v on="$C_CYAN$C_BOLD" -v off="$C_RESET" "$_UI_AWK"'
+        NR == 1 { if (f) $f = titles($f, on, off); else $0 = titles($0, on, off) } { print }' "$in/rows" >"$in/rows.t" &&
+        mv "$in/rows.t" "$in/rows"
+    fi
   fi
   # not sortable, with key hints: they are drawn again when the window is resized
   if (( ! sortable )) && [[ " $* " == *' --header='* ]]; then

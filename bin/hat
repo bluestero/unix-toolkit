@@ -289,7 +289,7 @@ github_add() {
 github_login() {
   local a=$1 prev users r
   [[ -f $HAT_GH/$a.gitconfig ]] || die "No GitHub account '$a' · see: hat github ls"
-  command -v gh >/dev/null || die "The gh command isn't installed"
+  ui_need gh gh "hat signs it in to your GitHub accounts" || die "The gh command isn't installed · tk install gh"
   hat_gh_signed_in "$a" && { ok "gh is already signed in as $a"; return 0; }
   prev=$(hat_gh_active) users=$(hat_gh_users)
   info "Sign the browser in to github.com as ${C_BOLD}$a${C_RESET} first: gh signs in whoever the browser is."
@@ -509,13 +509,28 @@ p_todo() { printf '%s' "$1" >"$UI_TOAST_DIR/todo.$(date +%s%N)" 2>/dev/null; }
 p_gh_login() {   # account -> fzf actions
   local a=$1
   [[ -n $a ]] || return 0
-  command -v gh >/dev/null || { ui_toast "✗ The gh command isn't installed"; return; }
+  command -v gh >/dev/null ||
+    { ip_confirm "The gh command isn't installed. Install it now? (from GitHub into ~/.local/bin, no sudo; then the sign-in)" "gh-install $a" y; return; }
   hat_gh_signed_in "$a" && { ui_toast "✓ gh is already signed in as $a"; return; }
   [[ -s $IP/gh-login.pid ]] && kill -0 "$(<"$IP/gh-login.pid")" 2>/dev/null &&
     { ui_toast "A gh sign-in is already waiting for the browser"; return; }
   ( "$SELF" __ghlogin "$a" </dev/null >/dev/null 2>&1 & ) 2>/dev/null
   printf 'progress' >"$UI_TOAST_DIR/id" 2>/dev/null   # holds the footer until the result
   ip_fz change-footer "gh sign-in as $a: asking GitHub for a code…"
+}
+# gh installed from the list: the installer runs in the background (no questions: the
+# yes was given in the header), then the sign-in carries on
+p_gh_install() {   # account -> fzf actions
+  ( "$SELF" __ghinstall "$1" </dev/null >/dev/null 2>&1 & ) 2>/dev/null
+  printf 'progress' >"$UI_TOAST_DIR/id" 2>/dev/null
+  ip_fz change-footer "Installing gh from GitHub…"
+}
+p_gh_install_job() {   # account (background)
+  "$ROOT/install.sh" --yes gh </dev/null >/dev/null 2>&1; hash -r
+  if command -v gh >/dev/null; then
+    p_todo "$(ip_fz change-footer "✓ gh installed · gh sign-in as $1: asking GitHub for a code…")"
+    p_gh_job "$1"
+  else rm -f "$UI_TOAST_DIR/id"; p_todo "$(ui_toast "✗ gh didn't install: see ~/.local/state/work-toolkit/setup.log")"; fi
 }
 p_gh_job() {   # account (background)
   local a=$1 prev users log=$IP/gh-login.log code pid i r copied=""
@@ -593,7 +608,7 @@ p_key() {   # key folder/row-key query
       case $k in
         enter) p_verify ;;
         alt-y) if p_copy "$(gh_pub "$(ip_get gh_key)")"; then ui_toast "✓ the public key is copied"
-               else ui_toast "✗ no clipboard tool (wl-copy or xclip): copy it from the bottom line"; fi ;;
+               else ui_toast "✗ no clipboard tool (tk install clipboard): copy it from the bottom line"; fi ;;
         esc) p_to_acct github ;;
         left) echo backward-char ;; right) echo forward-char ;;
       esac ;;
@@ -691,6 +706,8 @@ p_confirmed() {   # yes / no
       else p_to_list; fi ;;
     gh-login)
       if [[ $1 == yes ]]; then ip_join "$(p_to_acct github)" "$(p_gh_login "${p#* }")"; else p_to_acct github; fi ;;
+    gh-install)
+      if [[ $1 == yes ]]; then ip_join "$(p_to_acct github)" "$(p_gh_install "${p#* }")"; else p_to_acct github; fi ;;
     claude-rm|github-rm)
       local n=${p#* } kind=${w%-rm}
       if [[ $1 == yes ]]; then
@@ -836,6 +853,7 @@ case "${1:-}" in
   __table) p_rows | UI_TABLE_FIELD=2 print_table 2 "$(( ${FZF_PREVIEW_COLUMNS:-60} - 2 ))" | cut -f2- ;;
   __acctrows) p_acct_rows "$2" ;;
   __ghlogin) p_gh_job "$2" ;;
+  __ghinstall) p_gh_install_job "$2" ;;
   __gh) shift; exec_gh; exec gh "$@" ;;   # the shell's gh function (shell/common.sh)
   __pickrows) p_pick_rows "$2" "$3" ;;
   __key) p_key "$2" "${3:-}" "${4:-}" ;;

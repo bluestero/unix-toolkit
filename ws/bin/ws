@@ -297,7 +297,10 @@ picker() {
   state=$(mktemp); PICKER_STATE=$state; IP=$(mktemp -d); export IP
   trap 'rm -rf "${PICKER_STATE:-}" "${IP:-}"' EXIT
   ide=$(default_ide); ide_installed "$ide" || ide=$(installed_ides | head -1)
-  [[ -n "$ide" ]] || die "No supported IDE installed · see: ws default"
+  if [[ -z "$ide" ]]; then   # none yet: offer Zed (ws's default)
+    ui_need zed zed "ws opens workspaces in an IDE" || die "No supported IDE installed · tk install zed (or vscode)"
+    ide=zed
+  fi
   echo "$ide" >"$state"
   # ctrl-x closes the window. Without Window Calls it asks, in the list's header,
   # whether to install it; only yes leaves the list (the installer is its own screen).
