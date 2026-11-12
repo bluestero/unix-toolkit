@@ -100,7 +100,8 @@ emit_eval() {
 
 strip_ansi() { printf '%s' "${1//$'\e['*([0-9;])m/}"; }
 
-# Width on screen, for awk (mawk counts bytes): vis(s) is how many columns s takes, colours
+# Width on screen, for awk run with LC_ALL=C (it counts bytes; gawk in a UTF-8 locale
+# would reject the byte ranges below): vis(s) is how many columns s takes, colours
 # left out, a CJK or emoji character counting 2. ch(s) is the length in bytes of its first
 # character, chw(c) the columns of one character. Prepended to the awk programs below.
 _UI_AWK='BEGIN { WIDE = "^(\341[\204\205][\200-\277]|\342[\272-\277][\200-\277]|[\343-\352][\200-\277][\200-\277]|[\353\354][\200-\277][\200-\277]|\355[\200-\236][\200-\277]|\357[\244-\253][\200-\277]|\357\274[\200-\277]|\357\275[\200-\240]|\357\277[\240-\246]|\360\237[\214-\233][\200-\277]|\360\237[\244-\253][\200-\277]|\360[\240-\277][\200-\277][\200-\277])"
@@ -136,7 +137,7 @@ function fit(s, n, rs,  out, v, m, c, w) {
 # and UI_TABLE_ORDER (the columns in this order, e.g. 2,1,3).
 # One awk pass: a 400-row table takes a few ms at any width.
 print_table() {
-  awk -v gap="${1:-2}" -v fill="${2:-0}" -v full="${3:-}" -v rs="$C_RESET" \
+  LC_ALL=C awk -v gap="${1:-2}" -v fill="${2:-0}" -v full="${3:-}" -v rs="$C_RESET" \
       -v f="${UI_TABLE_FIELD:-0}" -v order="${UI_TABLE_ORDER:-}" "$_UI_AWK"'
     { L[NR] = $0 }
     END {
@@ -498,10 +499,10 @@ ui_sort_title() {
   read -r cur col way <"$d/state"; cur=${cur:-1} col=${col:-1} way=${way:-none}
   # how wide the laid-out table is (the divider above it reaches its last column)
   if [[ ! -s "$d/width" || "$d/rows" -nt "$d/width" ]]; then
-    awk -F '\t' -v f="${UI_SORT_FIELD:-0}" "$_UI_AWK"'{ t = f ? $f : $0; sub(/\t.*/, "", t); w = vis(t); if (w > m) m = w }
+    LC_ALL=C awk -F '\t' -v f="${UI_SORT_FIELD:-0}" "$_UI_AWK"'{ t = f ? $f : $0; sub(/\t.*/, "", t); w = vis(t); if (w > m) m = w }
       END { print m + 0 }' "$d/rows" >"$d/width"
   fi
-  head -1 "$d/rows" | awk -F '\t' -v f="${UI_SORT_FIELD:-0}" -v cur="$cur" -v col="$col" -v way="$way" \
+  head -1 "$d/rows" | LC_ALL=C awk -F '\t' -v f="${UI_SORT_FIELD:-0}" -v cur="$cur" -v col="$col" -v way="$way" \
       -v on="$C_CYAN$C_BOLD" -v off="$C_RESET" -v spans="$d/spans" -v title="$d/title" '
     { t = f ? $f : $0; sub(/\t.*/, "", t); gsub(/\033\[[0-9;]*m/, "", t); out = ""; len = 0; p = 1; n = 0
       printf "" > spans
@@ -526,7 +527,7 @@ ui_sort_rows() {
   [[ "$way" == desc ]] && r=r
   # sort on the column's plain text (marks like ● left out); ties keep their order.
   # Columns are counted on screen: a wide character takes 2.
-  tail -n +2 "$d/rows" | awk -F '\t' -v f="${UI_SORT_FIELD:-0}" -v s="${s:-1}" -v e="$e" "$_UI_AWK"'
+  tail -n +2 "$d/rows" | LC_ALL=C awk -F '\t' -v f="${UI_SORT_FIELD:-0}" -v s="${s:-1}" -v e="$e" "$_UI_AWK"'
     { t = f ? $f : $0; t = plain(t); gsub(WIDES, "\001\001", t); gsub(/[\300-\367][\200-\277]*/, "\001", t)
       k = e ? substr(t, s, e - s) : substr(t, s); gsub(/\001/, "", k); gsub(/^ +| +$/, "", k)
       if (k ~ /^[0-9]+[smhdwy]([0-9]+[smhdwy])*$/) {   # an age (9d, 4h48m): by length of time, not by letters
@@ -727,7 +728,7 @@ ui_sort_step() {
 # split by single spaces. Positions count characters, as kubectl (Go's tabwriter) pads
 # them, not screen columns: a wide character counts 1 here too.
 ui_split_cols() {
-  awk "$_UI_AWK"'
+  LC_ALL=C awk "$_UI_AWK"'
     # a colour code goes with the text after it (a reset with the text before), so it
     # stays in its own cell even when a neighbour is cut
     function walk(s, title,  out, cell, pend, pe, v, m, c, sp) {

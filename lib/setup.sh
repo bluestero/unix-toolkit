@@ -73,7 +73,7 @@ use_gum() {
   local g
   GUM=""
   [[ "${WORK_TOOLKIT_PLAIN:-0}" == 1 || ! -t 0 || ! -t 1 ]] && return 1
-  for g in "$(command -v gum 2>/dev/null)" "$HOME/.local/bin/gum"; do
+  for g in "$(type -P gum 2>/dev/null)" "$HOME/.local/bin/gum"; do
     [[ -n "$g" && -x "$g" ]] || continue
     "$g" choose --help 2>&1 | grep -q -- '--label-delimiter' && { GUM=$g; return 0; }
   done
@@ -89,7 +89,7 @@ install_gum() {
     aarch64|arm64) arch=arm64 ;;
     *) warn "no gum download for $(uname -m)"; return 1 ;;
   esac
-  command -v curl >/dev/null || { warn "curl is needed to download gum"; return 1; }
+  type -P curl >/dev/null || { warn "curl is needed to download gum"; return 1; }
   f="gum_${GUM_VERSION}_Linux_${arch}.tar.gz"
   url="https://github.com/charmbracelet/gum/releases/download/v$GUM_VERSION"
   tmp=$(mktemp -d)
@@ -156,7 +156,7 @@ fetch_yazi() {
     aarch64|arm64) arch=aarch64; want=$YAZI_SHA_aarch64 ;;
     *) warn "no yazi download for $(uname -m)"; return 1 ;;
   esac
-  command -v unzip >/dev/null || { warn "unzip is needed to unpack yazi"; return 1; }
+  type -P unzip >/dev/null || { warn "unzip is needed to unpack yazi"; return 1; }
   f="yazi-${arch}-unknown-linux-musl.zip"
   url="https://github.com/sxyazi/yazi/releases/download/v$YAZI_VERSION/$f"
   tmp=$(mktemp -d)

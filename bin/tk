@@ -37,8 +37,8 @@ field() { cut -d'|' -f"$2" <<<"$1"; }
 ready() {
   local name; name=$(field "$1" 1)
   local need; need=$(field "$1" 4)
-  command -v "$name" >/dev/null || { printf '%s' "${C_YELLOW}not on PATH${C_RESET}  $(ui_hint './install.sh commands')"; return 1; }
-  [[ -z "$need" ]] || command -v "$need" >/dev/null || { printf '%s' "${C_YELLOW}needs $need${C_RESET}"; return 1; }
+  type -P "$name" >/dev/null || { printf '%s' "${C_YELLOW}not on PATH${C_RESET}  $(ui_hint './install.sh commands')"; return 1; }
+  [[ -z "$need" ]] || type -P "$need" >/dev/null || { printf '%s' "${C_YELLOW}needs $need${C_RESET}"; return 1; }
   printf '%s' "${C_GREEN}✓ ready${C_RESET}"
 }
 
@@ -59,7 +59,7 @@ cmd_ls() {
 
 # ---------------------------------------------------------------- picker ---
 cmd_pick() {
-  if [[ ! -t 0 || ! -t 1 ]] || ! command -v fzf >/dev/null; then cmd_ls; return; fi
+  if [[ ! -t 0 || ! -t 1 ]] || ! type -P fzf >/dev/null; then cmd_ls; return; fi
   local t rows="COMMAND${S}AREA${S}WHAT IT DOES"$'\n' sel
   for t in "${TOOLS[@]}"; do
     rows+="$(field "$t" 1)$S${C_DIM}$(field "$t" 2)${C_RESET}$S$(field "$t" 3)"$'\n'
@@ -146,20 +146,20 @@ from_doctor() {  # a tool's own "✓ x" / "! x — fix" lines
 cmd_doctor() {
   [[ -t 1 ]] || ui_no_color
   local tool need t n total left bad=0 rows="" p first
-  for tool in okcli kx; do command -v "$tool" >/dev/null && from_doctor "$tool"; done
-  if ! command -v twingate >/dev/null; then check twin bad "twingate isn't installed"
+  for tool in okcli kx; do type -P "$tool" >/dev/null && from_doctor "$tool"; done
+  if ! type -P twingate >/dev/null; then check twin bad "twingate isn't installed"
   elif [[ "$(twingate status -d 2>/dev/null | head -n1)" == online ]]; then check twin ok "connected"
   else check twin bad "Twingate isn't connected" "open the Twingate app"; fi
   for t in "${TOOLS[@]}"; do
     tool=$(field "$t" 1); need=$(field "$t" 4)
     [[ " okcli kx twin " == *" $tool "* ]] && continue
-    if ! command -v "$tool" >/dev/null; then check "$tool" bad "not on PATH" "tk install commands"
-    elif [[ -n "$need" ]] && ! command -v "$need" >/dev/null; then check "$tool" bad "needs $need"
+    if ! type -P "$tool" >/dev/null; then check "$tool" bad "not on PATH" "tk install commands"
+    elif [[ -n "$need" ]] && ! type -P "$need" >/dev/null; then check "$tool" bad "needs $need"
     else check "$tool" ok ready; fi
   done
   if [[ -n "${KX_SHELL:-}" && -n "${OKCLI_SHELL:-}" ]]; then check tk ok "shell hooks"
   else check tk bad "shell hooks aren't loaded" "tk install bash"; fi
-  command -v fzf >/dev/null && check tk ok fzf || check tk bad "fzf isn't installed (the pickers need it)"
+  type -P fzf >/dev/null && check tk ok fzf || check tk bad "fzf isn't installed (the pickers need it)"
   local state l c
   state=$(toolkit_state)
   read -r n total left <<<"${state%%$'\n'*}"

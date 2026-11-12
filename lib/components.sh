@@ -204,7 +204,7 @@ label_starship() { echo "Starship prompt"; }
 title_starship() { echo "Prompt showing git branch, k8s cluster, AWS profile and PROD warnings"; }
 detail_starship() { echo "prompt config (git, python, k8s, AWS profile + expiry, PROD markers); starship itself, latest from GitHub (sha256-checked), in ~/.local/bin if it isn't installed"; }
 state_starship() { NOTE=""; if linked "$ss" "$ss_src"; then STATE=installed; else STATE=missing; fi
-  command -v starship >/dev/null || { NOTE="starship itself isn't installed"; [[ $STATE == installed ]] && STATE=partial; }; }
+  type -P starship >/dev/null || { NOTE="starship itself isn't installed"; [[ $STATE == installed ]] && STATE=partial; }; }
 install_starship() {
   get_tool starship "the prompt itself" "about 5 MB" fetch_starship
   linked "$ss" "$ss_src" && { ok "already linked"; return; }
@@ -235,12 +235,12 @@ install_fzf() {
     dry && return
     fetch_fzf && ok "fzf $(fzf_ver "$fzf_mine")" || fail "not installed (see the log)"
   else skip; fi
-  case "$(command -v fzf)" in "$fzf_mine"|"") ;; *) warn "$(command -v fzf) comes first on PATH; open a new terminal" ;; esac
+  case "$(type -P fzf)" in "$fzf_mine"|"") ;; *) warn "$(type -P fzf) comes first on PATH; open a new terminal" ;; esac
 }
 uninstall_fzf() {
   [[ -e "$fzf_mine" ]] || { ok "not installed"; return 0; }
   rm -f "$fzf_mine"
-  if command -v fzf >/dev/null; then ok "removed; back to $(command -v fzf) $(fzf_ver)"
+  if type -P fzf >/dev/null; then ok "removed; back to $(type -P fzf) $(fzf_ver)"
   else ok "removed (no other fzf: pickers fall back to plain lists)"; fi
 }
 
@@ -279,7 +279,7 @@ state_kitty() {
   local v; v=$(kapp_ver)
   if [[ -z "$v" ]]; then
     STATE=missing
-    command -v kitty >/dev/null && NOTE="now: $(kitty --version 2>/dev/null | awk '{print $2}') (apt)"
+    type -P kitty >/dev/null && NOTE="now: $(kitty --version 2>/dev/null | awk '{print $2}') (apt)"
     return
   fi
   kitty_latest_info
@@ -324,7 +324,7 @@ install_kitty() {
       sed -i "s|^Icon=kitty$|Icon=$kapp/share/icons/hicolor/256x256/apps/kitty.png|" "$kitty_desktop"
     fi
     sed -i -E "s#^(Try)?Exec=kitty( |$)#\1Exec=$kapp_bin\2#" "$kitty_desktop"
-    command -v update-desktop-database >/dev/null && update-desktop-database "$(dirname "$kitty_desktop")" 2>/dev/null
+    type -P update-desktop-database >/dev/null && update-desktop-database "$(dirname "$kitty_desktop")" 2>/dev/null
     kapp_desktop_ok && ok "done" || fail "couldn't update $kitty_desktop"
   fi
 
@@ -345,7 +345,7 @@ uninstall_kitty() {
   as_root update-alternatives --remove x-terminal-emulator "$kapp_bin" >>"$log_file" 2>&1 || true
   if [[ -f "$kitty_desktop" ]]; then
     sed -i -E "s#^(Try)?Exec=$kapp_bin#\1Exec=kitty#" "$kitty_desktop"
-    command -v update-desktop-database >/dev/null && update-desktop-database "$(dirname "$kitty_desktop")" 2>/dev/null
+    type -P update-desktop-database >/dev/null && update-desktop-database "$(dirname "$kitty_desktop")" 2>/dev/null
   fi
   unlink_file "$HOME/.local/bin/kitty" "$kapp_bin"
   unlink_file "$HOME/.local/bin/kitten" "$kapp/bin/kitten"
@@ -360,7 +360,7 @@ label_kitty_config() { echo "Kitty settings"; }
 title_kitty_config() { echo "Use the toolkit's kitty terminal settings"; }
 detail_kitty_config() { echo "~/.config/kitty/kitty.conf from kitty/kitty.conf"; }
 state_kitty_config() { NOTE=""
-  command -v kitty >/dev/null || { STATE=n/a; NOTE="kitty isn't installed"; return; }
+  type -P kitty >/dev/null || { STATE=n/a; NOTE="kitty isn't installed"; return; }
   if linked "$kc" "$kc_src"; then STATE=installed; else STATE=missing; fi; }
 install_kitty_config() { linked "$kc" "$kc_src" && { ok "already linked"; return; }
   if [[ -f "$kc" && ! -L "$kc" ]] && ! cmp -s "$kc" "$kc_src"; then
@@ -386,11 +386,11 @@ title_btop() { echo "btop system monitor, set up to follow your kitty colour the
 detail_btop() { echo "btop (apt) if missing; ~/.config/btop/btop.conf -> btop/btop.conf; kitty.theme written by k-theme"; }
 state_btop() { NOTE=""
   local n=0
-  command -v btop >/dev/null && (( n++ ))
+  type -P btop >/dev/null && (( n++ ))
   linked "$bt" "$bt_src" && (( n++ ))
   if (( n == 2 )); then STATE=installed; elif (( n )); then STATE=partial; else STATE=missing; fi; }
 install_btop() {
-  if ! command -v btop >/dev/null; then
+  if ! type -P btop >/dev/null; then
     if ask "Install btop? (apt, needs sudo)"; then
       apt_install btop && ok "installed" || { fail "apt failed (see $log_file)"; return 1; }
     else skip; return 0; fi
@@ -404,7 +404,7 @@ install_btop() {
 uninstall_btop() {
   rm -f "$HOME/.config/btop/themes/kitty.theme"
   unlink_file "$bt" "$bt_src"
-  if command -v btop >/dev/null && ask "Also remove the btop package? (apt, needs sudo)" n; then
+  if type -P btop >/dev/null && ask "Also remove the btop package? (apt, needs sudo)" n; then
     as_root apt-get remove -y btop >>"$log_file" 2>&1 && ok "package removed" || fail "apt failed (see $log_file)"
   fi
 }
@@ -427,7 +427,7 @@ state_yazi() {
 install_yazi() {
   local v; v=$(yazi_ver "$yazi_mine")
   if [[ -n "$v" ]] && ! ver_lt "$v" "$YAZI_VERSION"; then ok "yazi $v"; return; fi
-  if [[ -z "$v" ]] && command -v yazi >/dev/null; then ok "yazi $(yazi_ver) is already installed elsewhere"; return; fi
+  if [[ -z "$v" ]] && type -P yazi >/dev/null; then ok "yazi $(yazi_ver) is already installed elsewhere"; return; fi
   if ask "Download yazi $YAZI_VERSION into ~/.local/bin? (about 10 MB, no sudo)"; then
     dry && return
     fetch_yazi && ok "yazi $(yazi_ver "$yazi_mine") ${D}(type y; q quits, Q quits without cd)${R}" || fail "not installed (see the log)"
@@ -450,7 +450,7 @@ detail_yazi_keys() { echo "a marked block from yazi/keymap.toml in ~/.config/yaz
 # true when the file already has the first form, outside our block
 yk_clash() { [[ -f "$yk_file" ]] && awk -v s="$BLOCK_START" -v e="$BLOCK_END" '$0==s{f=1;next} $0==e{f=0;next} !f' "$yk_file" | grep -qE '^[[:space:]]*prepend_keymap[[:space:]]*='; }
 state_yazi_keys() { NOTE=""
-  command -v yazi >/dev/null || { STATE=n/a; NOTE="yazi isn't installed"; return; }
+  type -P yazi >/dev/null || { STATE=n/a; NOTE="yazi isn't installed"; return; }
   if has_block "$yk_file" "$(<"$yk_src")"; then STATE=installed
   elif grep -qxF "$BLOCK_START" "$yk_file" 2>/dev/null; then STATE=partial; NOTE="out of date"
   else STATE=missing; fi; }
@@ -528,10 +528,10 @@ label_login_shell() { echo "Zsh as default"; }
 title_login_shell() { echo "Open new terminals in zsh (log out once afterwards)"; }
 detail_login_shell() { echo "make zsh your default shell (new terminals; log out once for GNOME)"; }
 state_login_shell() { NOTE=""
-  command -v zsh >/dev/null || { STATE=n/a; NOTE="needs zsh first"; return; }
+  type -P zsh >/dev/null || { STATE=n/a; NOTE="needs zsh first"; return; }
   if [[ "$(login_shell)" == */zsh ]]; then STATE=installed; else STATE=missing; NOTE="now: $(login_shell)"; fi; }
 install_login_shell() {
-  local z; z=$(command -v zsh) || { skip "zsh isn't installed"; return; }
+  local z; z=$(type -P zsh) || { skip "zsh isn't installed"; return; }
   [[ "$(login_shell)" == "$z" ]] && { ok "already zsh"; return; }
   if ask "Make zsh your login shell (chsh asks for your password)?"; then
     remember_setting login-shell "$(login_shell)"
@@ -552,7 +552,7 @@ label_kitty_nautilus() { echo "Kitty in Files"; }
 title_kitty_nautilus() { echo "Make kitty the default terminal and add \"Open in Terminal\" to Files"; }
 detail_kitty_nautilus() { echo "kitty as default terminal, 'Open in Terminal' in Files"; }
 state_kitty_nautilus() { NOTE=""
-  command -v kitty >/dev/null && command -v nautilus >/dev/null || { STATE=n/a; NOTE="needs kitty and nautilus"; return; }
+  type -P kitty >/dev/null && type -P nautilus >/dev/null || { STATE=n/a; NOTE="needs kitty and nautilus"; return; }
   local n=0
   [[ -f "$nat_ext" ]] && (( n++ ))
   [[ "$(gsettings get "$nat_schema" terminal 2>/dev/null)" == "'kitty'" ]] && (( n++ ))
@@ -638,7 +638,7 @@ look_menu() {
     dry) say "  ${C}?${R} $nice settings $state ${D}(dry run: not asked)${R}"; return 0 ;;
     yes) look_applied "$path" "$file" "$ign" && { ok "look already applied"; return 0; }; pick=$LOOK_APP ;;
     *)
-      if ! command -v fzf >/dev/null || [[ ! -t 0 ]]; then ok "$nice settings kept"; return 0; fi
+      if ! type -P fzf >/dev/null || [[ ! -t 0 ]]; then ok "$nice settings kept"; return 0; fi
       rows=$(look_choices "$name")
       q="${C_BOLD}$nice settings $state${C_RESET}"
       pick=$(printf '%s\n' "$rows" | ui_fzf "${UI_CONFIRM_LABEL:-settings}" --height=~60% --info=hidden \
@@ -732,7 +732,7 @@ title_window_calls() { echo "Let ws close and focus editor windows (GNOME extens
 detail_window_calls() { echo "GNOME extension $wc_uuid from extensions.gnome.org into ~/.local/share/gnome-shell/extensions"; }
 state_window_calls() {
   NOTE=""
-  command -v gnome-shell >/dev/null || { STATE=n/a; NOTE="needs GNOME"; return; }
+  type -P gnome-shell >/dev/null || { STATE=n/a; NOTE="needs GNOME"; return; }
   if wc_present && wc_enabled; then
     if wc_live; then STATE=installed; else STATE=partial; NOTE="log out and back in to load it"; fi
   elif wc_present; then STATE=partial; NOTE="installed, not enabled"
@@ -813,7 +813,7 @@ label_alt_tab_desktop() { echo "Alt+Tab after Show Desktop"; }
 title_alt_tab_desktop() { echo "After Super+D, Alt+Tab returns to the window you minimized (GNOME extension; log out once)"; }
 detail_alt_tab_desktop() { echo "~/.local/share/gnome-shell/extensions/$atd_uuid -> gnome/$atd_uuid, added to enabled extensions"; }
 state_alt_tab_desktop() { NOTE=""
-  command -v gnome-shell >/dev/null || { STATE=n/a; NOTE="needs GNOME"; return; }
+  type -P gnome-shell >/dev/null || { STATE=n/a; NOTE="needs GNOME"; return; }
   if linked "$atd_dir" "$atd_src" && atd_enabled; then STATE=installed
   elif linked "$atd_dir" "$atd_src" || atd_enabled; then STATE=partial
   else STATE=missing; fi; }
@@ -840,7 +840,7 @@ label_hide_docker_tray() { echo "Hide Docker's tray dots"; }
 title_hide_docker_tray() { echo "hides Docker Desktop's dead three-dots tray icon (GNOME extension; log out once)"; }
 detail_hide_docker_tray() { echo "~/.local/share/gnome-shell/extensions/$hdt_uuid -> gnome/$hdt_uuid, added to enabled extensions"; }
 state_hide_docker_tray() { NOTE=""
-  command -v gnome-shell >/dev/null || { STATE=n/a; NOTE="needs GNOME"; return; }
+  type -P gnome-shell >/dev/null || { STATE=n/a; NOTE="needs GNOME"; return; }
   if linked "$hdt_dir" "$hdt_src" && hdt_enabled; then STATE=installed
   elif linked "$hdt_dir" "$hdt_src" || hdt_enabled; then STATE=partial
   else STATE=missing; fi; }
@@ -885,9 +885,9 @@ label_rofi() { echo "Rofi launcher"; }
 title_rofi() { echo "Alt+Space opens an app launcher (Alt+Shift+Space ssh, Super+X power menu, Super+S speaker/mic/wifi/bluetooth), styled like kitty"; }
 detail_rofi() { echo "rofi (apt) if missing; ~/.config/rofi/config.rasi -> rofi/config.rasi; four GNOME shortcuts (Alt+Space, Alt+Shift+Space, Super+X, Super+S); launcher icon (rofi/rofi-icon.png) in the app list and dock"; }
 state_rofi() { NOTE=""
-  command -v gsettings >/dev/null || { STATE=n/a; NOTE="needs GNOME"; return; }
+  type -P gsettings >/dev/null || { STATE=n/a; NOTE="needs GNOME"; return; }
   local n=0
-  command -v rofi >/dev/null && (( n++ ))
+  type -P rofi >/dev/null && (( n++ ))
   linked "$rofi_conf" "$rofi_src" && (( n++ ))
   rofi_keys_on && (( n++ ))
   launcher_entry_set && (( n++ ))
@@ -896,7 +896,7 @@ k_launch="$repo/rofi/bin/k-launch"
 rofi_keys_on() { kb_runs rofi-launcher "$k_launch apps" && kb_runs rofi-ssh "$k_launch ssh" &&
   kb_runs rofi-power "$k_launch power" && kb_runs rofi-devices "$k_launch settings"; }
 install_rofi() {
-  if ! command -v rofi >/dev/null; then
+  if ! type -P rofi >/dev/null; then
     if ask "Install rofi? (apt, needs sudo)"; then
       apt_install rofi && ok "installed" || { fail "apt failed (see $log_file)"; return 1; }
     else skip; return 0; fi
@@ -925,7 +925,7 @@ uninstall_rofi() {
   unlink_file "$rofi_conf" "$rofi_src"
   rm -f "${rofi_conf%/*}/colors.rasi"
   remove_launcher_entry
-  if command -v rofi >/dev/null && ask "Also remove the rofi package? (apt, needs sudo)" n; then
+  if type -P rofi >/dev/null && ask "Also remove the rofi package? (apt, needs sudo)" n; then
     as_root apt-get remove -y rofi >>"$log_file" 2>&1 && ok "package removed" || fail "apt failed (see $log_file)"
   fi
 }
@@ -942,7 +942,7 @@ label_app_keys() { echo "Super+number app keys"; }
 title_app_keys() { echo "Super+1..9 launches, raises or minimizes the Nth dock app (needs Window Calls; replaces GNOME's own)"; }
 detail_app_keys() { echo "nine GNOME shortcuts (Super+1..9) running bin/k-appkey; GNOME's switch-to-application keys turned off (put back by the uninstall)"; }
 state_app_keys() { NOTE=""
-  command -v gsettings >/dev/null || { STATE=n/a; NOTE="needs GNOME"; return; }
+  type -P gsettings >/dev/null || { STATE=n/a; NOTE="needs GNOME"; return; }
   if ak_keys_on && ak_native_off; then STATE=installed
   elif ak_keys_on || ak_native_off; then STATE=partial
   else STATE=missing; fi; }
@@ -981,14 +981,14 @@ ver_of() {
 }
 # tool_state <command>: installed (with version, and where when it isn't ours) or missing
 tool_state() {
-  local p; p=$(command -v "$1"); NOTE=""
+  local p; p=$(type -P "$1"); NOTE=""
   [[ -n $p ]] || { STATE=missing; return; }
   STATE=installed; NOTE=$(ver_of "$p")
   [[ $p == "$HOME/.local/bin/$1" ]] || NOTE+=" (${p/#$HOME/\~})"
 }
 # get_tool <command> "<what it's for>" "<size>" <fetch function>
 get_tool() {
-  local p; p=$(command -v "$1")
+  local p; p=$(type -P "$1")
   [[ -n $p ]] && { ok "$1 $(ver_of "$p") is already installed"; return; }
   [[ $OS_KIND == linux && -n $(dl_arch) ]] || { skip "no download for this machine; install $1 yourself"; return; }
   ask "Download the latest $1 into ~/.local/bin? ($2; $3, no sudo)" || { skip; return; }
@@ -997,7 +997,7 @@ get_tool() {
 # drop_tool <command>: removes ours from ~/.local/bin; one installed another way stays
 drop_tool() {
   if [[ -e "$HOME/.local/bin/$1" ]]; then rm -f "$HOME/.local/bin/$1"; ok "removed $1"
-  elif command -v "$1" >/dev/null; then ok "$1 wasn't installed by the toolkit ($(command -v "$1")), so it stays"
+  elif type -P "$1" >/dev/null; then ok "$1 wasn't installed by the toolkit ($(type -P "$1")), so it stays"
   else ok "not installed"; fi
 }
 # gh_tool <owner/repo> <asset> <command>: newest release asset (a tar.gz holding <command>, or the program itself) into ~/.local/bin
@@ -1030,7 +1030,7 @@ title_aws_cli() { echo "The aws command: okcli whoami, kx's EKS sign-in and kx s
 detail_aws_cli() { echo "latest AWS CLI v2 from awscli.amazonaws.com in ${awscli_dir/#$HOME/\~}, aws and aws_completer in ~/.local/bin"; }
 state_aws_cli() { tool_state aws; }
 install_aws_cli() {
-  command -v aws >/dev/null || command -v unzip >/dev/null || { skip "unzip is needed to unpack it (sudo apt install unzip)"; return; }
+  type -P aws >/dev/null || type -P unzip >/dev/null || { skip "unzip is needed to unpack it (sudo apt install unzip)"; return; }
   get_tool aws "okcli and kx's EKS sign-in use it" "about 60 MB" fetch_aws_cli
 }
 fetch_aws_cli() {
@@ -1087,7 +1087,7 @@ title_eks_clusters() { echo "Pick which AWS accounts and EKS clusters kx shows";
 detail_eks_clusters() { echo "runs kx sync: ticked clusters go in ~/.kube/config, unticked ones in ~/.config/kx/ignore (kx ignore / kx sync to change later)"; }
 state_eks_clusters() {
   local n; NOTE=""
-  command -v kubectl >/dev/null && command -v aws >/dev/null || { STATE=n/a; NOTE="needs kubectl and the aws CLI"; return; }
+  type -P kubectl >/dev/null && type -P aws >/dev/null || { STATE=n/a; NOTE="needs kubectl and the aws CLI"; return; }
   n=$(eks_contexts)
   if (( n )) || [[ -e $kx_ignore_file ]]; then STATE=installed; NOTE="$n context(s) · kx sync / kx ignore to change"
   else STATE=missing; fi
@@ -1242,7 +1242,7 @@ label_claude_skill() { echo "Claude skill"; }
 title_claude_skill() { echo "Claude Code knows okcli, kx, ctx and the rest, in every repo"; }
 detail_claude_skill() { echo "${claude_dir/#$HOME/\~}/skills/<name> links to claude/skills/<name> (and each layer's)"; }
 state_claude_skill() { local l t n=0 all=0; NOTE=""
-  command -v claude >/dev/null || [[ -d "$claude_dir" ]] || { STATE=n/a; NOTE="Claude Code isn't installed"; return; }
+  type -P claude >/dev/null || [[ -d "$claude_dir" ]] || { STATE=n/a; NOTE="Claude Code isn't installed"; return; }
   while IFS=$'\t' read -r l t; do (( all++ )); linked "$l" "$t" && (( n++ )); done < <(cs_pairs)
   if (( n == all )); then STATE=installed; elif (( n )); then STATE=partial; NOTE="$n of $all skills linked"; else STATE=missing; fi; }
 install_claude_skill() { local l t
@@ -1287,7 +1287,7 @@ label_claude_hook() { echo "Claude start hook"; }
 title_claude_hook() { echo "Every Claude Code session starts knowing your AWS profile, pin and cluster"; }
 detail_claude_hook() { echo "a SessionStart hook in ${ch_settings/#$HOME/\~} that runs: $ch_cmd"; }
 state_claude_hook() { NOTE=""
-  command -v claude >/dev/null || [[ -d "$claude_dir" ]] || { STATE=n/a; NOTE="Claude Code isn't installed"; return; }
+  type -P claude >/dev/null || [[ -d "$claude_dir" ]] || { STATE=n/a; NOTE="Claude Code isn't installed"; return; }
   if ch_json has 2>/dev/null; then STATE=installed; else STATE=missing; fi; }
 install_claude_hook() { ch_json has 2>/dev/null && { ok "already there"; return; }
   ask "Add the start hook to ${ch_settings/#$HOME/\~}? (runs ${C}ctx plain${R} when a session opens)" && { dry || ch_write add; } || skip; }
@@ -1301,7 +1301,7 @@ label_claude_guard() { echo "Claude PROD guard"; }
 title_claude_guard() { echo "Claude Code asks you first before changing anything on PROD"; }
 detail_claude_guard() { echo "a PreToolUse hook for Bash in ${ch_settings/#$HOME/\~} that runs: $cgd_cmd"; }
 state_claude_guard() { NOTE=""
-  command -v claude >/dev/null || [[ -d "$claude_dir" ]] || { STATE=n/a; NOTE="Claude Code isn't installed"; return; }
+  type -P claude >/dev/null || [[ -d "$claude_dir" ]] || { STATE=n/a; NOTE="Claude Code isn't installed"; return; }
   if cgd_json has 2>/dev/null; then STATE=installed; else STATE=missing; fi; }
 install_claude_guard() { cgd_json has 2>/dev/null && { ok "already there"; return; }
   ask "Add the PROD guard to ${ch_settings/#$HOME/\~}? (Claude asks you before a command that changes PROD)" && { dry || ch_write add "$cgd_cmd" PreToolUse Bash; } || skip; }
@@ -1348,7 +1348,7 @@ label_claude_guidelines() { echo "Claude guidelines"; }
 title_claude_guidelines() { echo "Claude Code follows the same coding guidelines in every project (think first, keep it simple, small diffs)"; }
 detail_claude_guidelines() { echo "one marked block in ${cg_file/#$HOME/\~}; the rest of that file is left alone"; }
 state_claude_guidelines() { NOTE=""
-  command -v claude >/dev/null || [[ -d "$claude_dir" ]] || { STATE=n/a; NOTE="Claude Code isn't installed"; return; }
+  type -P claude >/dev/null || [[ -d "$claude_dir" ]] || { STATE=n/a; NOTE="Claude Code isn't installed"; return; }
   if cg_json has 2>/dev/null; then STATE=installed
   elif cg_present; then STATE=partial; NOTE="out of date"
   else STATE=missing; fi; }
