@@ -11,7 +11,7 @@ Every command speaks the same words: `<tool>` picker, `<tool> <name>` switch, `l
 | `kx` | Kubernetes contexts **per shell** (switching in one terminal never moves another), namespaces, global default, EKS contexts linked to okcli profiles. Also a friendly front to kubectl: `kx pods`, `why`, `logs`, `shell`, `deploys`, `configs`, `secrets`, `services`, `forward`, `events`, `top`, `get` (see `kx help`). |
 | `twin` | Twingate exit nodes: picker, `twin gb`, `twin off`. Codes come from the node names. |
 | `ws` | Open workspaces in your IDE. Picker: ↑↓ pick, ←→ switch IDE (● = already open there, gets focused), tab ticks several, ctrl-x closes the window (needs `window-calls`). `ws <name>`, `ws close <name>`, `ws ls`, `ws default [ide]`, `ws edit` (your list: `~/.config/ws/workspaces`, which can include your layers' shared lists). |
-| `hat` | Which Claude profile, GitHub account and AWS profile a folder uses, for every repo under it. `hat` is one table of every folder wearing a hat, edited in place: ↑↓ folder, alt-←→ column, ←→ change the cell (tab searches the choices beside the table), enter saves them all; alt-a adds a folder, ctrl-x takes its hats off, alt-c / alt-g list the Claude profiles and GitHub accounts (add, remove). Questions open inside the table. `hat set ~/code claude=personal github=me`, `hat ls`, `hat show`, `hat exec -- <cmd>` (one command as the folder's hat: its AWS pin, and `gh` signed in as its account; for scripts and AI agents), `hat github add <account>` (added only once GitHub knows its key; then it offers to sign the `gh` command in as it too), `hat github login <account>` (that `gh` sign-in on its own; the accounts list flags ones without it). `ws ls` shows each workspace's. See [Hats](#hats-claude-github-and-aws-per-folder). |
+| `hat` | Which Claude profile, GitHub account and AWS profile a folder uses, for every repo under it. `hat` is one table of every folder wearing a hat, edited in place: ↑↓ folder, alt-←→ column, ←→ change the cell (tab searches the choices beside the table), enter saves them all; alt-a adds a folder, ctrl-x takes its hats off, alt-c / alt-g list the Claude profiles and GitHub accounts (add, remove). Questions open inside the table. `hat set ~/code claude=personal github=me`, `hat ls`, `hat show`, `hat exec -- <cmd>` (one command as the folder's hat: its AWS pin, and `gh` signed in as its account; for scripts and AI agents. In your shell `gh` already follows the folder's account by itself), `hat github add <account>` (added only once GitHub knows its key; then it offers to sign the `gh` command in as it too), `hat github login <account>` (that `gh` sign-in on its own; in the accounts list, alt-l does it without leaving the list and the GH column flags accounts without it). `ws ls` shows each workspace's. See [Hats](#hats-claude-github-and-aws-per-folder). |
 | `ctx` | One screen: AWS profile, cluster/namespace, Twingate, defaults and repo pin. `ctx plain` gives the same as labelled lines, (what Claude Code gets). Both show the folder's hat too: its GitHub account (flagged when git's email or `gh` doesn't match it) and Claude profile. |
 | `k-icon` | Kitty app icon: picker, `k-icon <name>`, `k-icon ls`. |
 | `k-config` | Edit `kitty/kitty.conf` (the file kitty reads through the link) in `$EDITOR` (else nano); warns if the link is missing. kitty reloads it by itself on save (0.47+). |
@@ -37,8 +37,20 @@ bash <(curl -fsSL https://raw.githubusercontent.com/bluestero/unix-toolkit/main/
 ```
 
 `--dir <folder>` puts the toolkit elsewhere. `--layer feelkit` (or `--layer <git URL>` for any other
-layer; repeat it for more) adds a layer in the same go. Or clone it yourself, anywhere, and run
-`./install.sh`: the installer records where it is.
+layer; repeat it for more) adds a layer in the same go.
+
+Or step by step, to see what each part does (over SSH: needs an SSH key on your GitHub account,
+`ssh -T git@github.com` checks it). The folder can be anywhere; the installer records where it is.
+
+```bash
+git clone git@github.com:bluestero/unix-toolkit.git ~/.local/share/unix-toolkit   # the toolkit
+mkdir -p ~/.local/bin
+ln -sfn ~/.local/share/unix-toolkit/bin/tk ~/.local/bin/tk                         # the tk command
+~/.local/bin/tk install                                                            # step 3 below
+```
+
+Plain `tk` works once you open a new terminal after installing. Layers are added the same way,
+over SSH: `tk layer add git@github.com:<owner>/<repo>.git`.
 
 **3. Install.** A tab per group of parts. Nothing is ticked: tick what you want with Space, then
 Enter twice (to the summary, then set up). Each change still asks first (Enter = yes).

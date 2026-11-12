@@ -145,19 +145,25 @@ cmd_show() {
 # (GH_TOKEN, for this command only), never whichever account gh has active; with no
 # login for it, gh says it isn't signed in instead of acting as someone else. Git
 # already follows the folder (the gitdir rules).
+# exec_gh: just the GitHub part (the shell's gh function runs gh through it).
+exec_gh() {   # gives gh the folder's account in this process's environment
+  local -a x; local g t
+  IFS=$'\t' read -r -a x <<<"$(hat_get "$PWD" | sed 's/\t/\t·/g; s/^/·/')"
+  g=${x[2]#·}
+  [[ -n $g && $g != *@* && $g != "$(hat_gh_active)" ]] && command -v gh >/dev/null || return 0
+  if t=$(gh auth token -u "$g" 2>/dev/null) && [[ -n $t ]]; then export GH_TOKEN=$t
+  else
+    warn "gh has no sign-in for $g (hat: alt-g, then alt-l on it), so gh runs signed out here."
+    export GH_CONFIG_DIR="$HAT_DIR/no-gh-login"; mkdir -p "$GH_CONFIG_DIR"; unset GH_TOKEN GITHUB_TOKEN
+  fi
+}
 cmd_exec() {
   [[ ${1:-} == -- ]] && shift
   [[ $# -ge 1 ]] || die "Usage: hat exec -- <command...>"
-  local -a x; local g a t
+  local -a x; local a
+  exec_gh
   IFS=$'\t' read -r -a x <<<"$(hat_get "$PWD" | sed 's/\t/\t·/g; s/^/·/')"
-  g=${x[2]#·} a=${x[4]#·}
-  if [[ -n $g && $g != *@* ]] && command -v gh >/dev/null; then
-    if t=$(gh auth token -u "$g" 2>/dev/null) && [[ -n $t ]]; then export GH_TOKEN=$t
-    else
-      warn "gh has no login for $g (gh auth login), so gh runs signed out here."
-      export GH_CONFIG_DIR="$HAT_DIR/no-gh-login"; mkdir -p "$GH_CONFIG_DIR"; unset GH_TOKEN GITHUB_TOKEN
-    fi
-  fi
+  a=${x[4]#·}
   if [[ -n $a ]] && command -v okcli >/dev/null; then exec okcli exec "$a" -- "$@"; fi
   [[ -n $a ]] && export AWS_PROFILE=$a
   exec "$@"
@@ -281,22 +287,27 @@ github_add() {
 # gh signs in whoever the browser is signed in as, so check it's <account>; and put
 # gh's active account back as it was (a new sign-in becomes the active one).
 github_login() {
-  local a=$1 prev now
+  local a=$1 prev users r
   [[ -f $HAT_GH/$a.gitconfig ]] || die "No GitHub account '$a' · see: hat github ls"
   command -v gh >/dev/null || die "The gh command isn't installed"
   hat_gh_signed_in "$a" && { ok "gh is already signed in as $a"; return 0; }
-  prev=$(hat_gh_active)
+  prev=$(hat_gh_active) users=$(hat_gh_users)
   info "Sign the browser in to github.com as ${C_BOLD}$a${C_RESET} first: gh signs in whoever the browser is."
   info "Then open the link below and type the code:"
   gh auth login --web --hostname github.com --git-protocol ssh </dev/null || die "gh sign-in didn't finish"
-  now=$(hat_gh_active)
-  [[ -n $prev && $prev != "$now" ]] && gh auth switch --hostname github.com --user "$prev" >/dev/null 2>&1
+  if r=$(gh_login_finish "$a" "$prev" "$users"); then ok "$r"; else warn "$r"; return 1; fi
+}
+# After gh auth login: put gh's active account back, and undo a sign-in as someone
+# else (the browser was signed in as another account). Prints what happened.
+gh_login_finish() {   # account active-before users-before
+  local a=$1 prev=$2 users=$3 now; now=$(hat_gh_active)
   if [[ $now != "$a" ]]; then
-    warn "The browser was signed in as $now, so gh signed in as $now, not $a."
-    info "    Sign the browser in as $a, then: hat github login $a"
-    return 1
+    grep -qx -- "$now" <<<"$users" || gh auth logout --hostname github.com --user "$now" >/dev/null 2>&1
+    [[ -n $prev ]] && gh auth switch --hostname github.com --user "$prev" >/dev/null 2>&1
+    echo "the browser was signed in as ${now:-nobody}, not $a: sign it in as $a and try again"; return 1
   fi
-  ok "gh is signed in as $a${prev:+ (its active account is still $prev)}"
+  [[ -n $prev && $prev != "$a" ]] && gh auth switch --hostname github.com --user "$prev" >/dev/null 2>&1
+  echo "gh is signed in as $a${prev:+ (the active account is still $prev)}"
 }
 github_rm() {
   local a=$1 p
@@ -440,11 +451,11 @@ p_acct_rows() {   # kind
   fi | UI_TABLE_FIELD=2 print_table 3 "$(( ${FZF_COLUMNS:-$(ui_cols)} - 6 ))"
 }
 p_to_acct() {   # kind [toast]
-  local -a a; local k=$1 note
-  if [[ $k == github ]]; then note="# a GitHub account: commit name and email, and the SSH key GitHub knows it by · GH: the gh command's sign-in (hat github login <account>)"
+  local -a a; local k=$1 note login=""
+  if [[ $k == github ]]; then note="# a GitHub account: commit name and email, and the SSH key GitHub knows it by · GH: the gh command's own sign-in"; login=" · alt-l: sign gh in"
   else note="# a Claude profile: its own sign-in, history and settings (~/.claude-profiles/<name>)"; fi
   a=("$(ip_fz reload-sync "$(p_cmd __acctrows "$k")")" "$(ip_back)" "pos(1)" "$(ip_fz change-query "")"
-     "$(ip_fz change-header "$(p_keys "$note"$'\n'"alt-a: add · ctrl-x: remove · esc: back to the folders")")"
+     "$(ip_fz change-header "$(p_keys "$note"$'\n'"alt-a: add$login · ctrl-x: remove · esc: back to the folders")")"
      "$(ip_fz change-prompt "$k> ")" "$(ip_fz change-border-label " hat · $(kind_label "$k")s ")" hide-preview)
   if [[ -n ${2:-} ]]; then a+=("$(ui_toast "$2")"); else a+=("$(ip_fz change-footer " ")"); fi
   ip_set mode "acct-$k"
@@ -463,6 +474,13 @@ p_pick_rows() {   # kind folder
   done <<<"$(kind_values "$1")"
 }
 
+# back to the accounts, offering gh's own sign-in when it hasn't one
+p_added() {   # account
+  local m="✓ GitHub account $1 added: GitHub knows its key"
+  if command -v gh >/dev/null && ! hat_gh_signed_in "$1"; then
+    ip_join "$(p_to_acct github "$m")" "$(ip_confirm "Also sign the gh command in as $1? It opens the browser." "gh-login $1" y)"
+  else p_to_acct github "$m"; fi
+}
 # ---- GitHub account added from the list: user, name, email, key, then GitHub says yes
 p_verify() {
   local u key r q; u=$(ip_get gh_user); key=$(ip_get gh_key)
@@ -470,7 +488,7 @@ p_verify() {
   case $r in
     ok)
       gh_write "$u" "$(ip_get gh_name)" "$(ip_get gh_email)" "$key"
-      p_to_acct github "✓ GitHub account $u added: GitHub knows its key" ; return ;;
+      p_added "$u"; return ;;
     other*)
       ip_join "$(ip_ask "Which key is $u's? (a private key file)" gh-keypath "~/.ssh/" "key: ")" \
         "$(ip_reask "GitHub says $(tilde "$key") belongs to ${r#other }, not $u")"; return ;;
@@ -482,6 +500,46 @@ p_verify() {
   ip_join "$(ip_fz change-header "$(ip_header "$q" "enter: check again · alt-y: copy the key · esc: cancel")")" \
     "$(ip_fz change-prompt "${C_YELLOW}key> ${C_RESET}")" "$(ip_fz change-footer "$(gh_pub "$key")")"
 }
+# ---- gh sign-in from the accounts list: gh's browser flow runs in the background
+# (it prints a code, then waits for the browser); its code and result come to the
+# footer through ui_fzf's toast folder, so the list stays open throughout.
+p_todo() { printf '%s' "$1" >"$UI_TOAST_DIR/todo.$(date +%s%N)" 2>/dev/null; }
+p_gh_login() {   # account -> fzf actions
+  local a=$1
+  [[ -n $a ]] || return 0
+  command -v gh >/dev/null || { ui_toast "✗ The gh command isn't installed"; return; }
+  hat_gh_signed_in "$a" && { ui_toast "✓ gh is already signed in as $a"; return; }
+  [[ -s $IP/gh-login.pid ]] && kill -0 "$(<"$IP/gh-login.pid")" 2>/dev/null &&
+    { ui_toast "A gh sign-in is already waiting for the browser"; return; }
+  ( "$SELF" __ghlogin "$a" </dev/null >/dev/null 2>&1 & ) 2>/dev/null
+  printf 'progress' >"$UI_TOAST_DIR/id" 2>/dev/null   # holds the footer until the result
+  ip_fz change-footer "gh sign-in as $a: asking GitHub for a code…"
+}
+p_gh_job() {   # account (background)
+  local a=$1 prev users log=$IP/gh-login.log code pid i r copied=""
+  prev=$(hat_gh_active) users=$(hat_gh_users)
+  gh auth login --web --hostname github.com --git-protocol ssh </dev/null >"$log" 2>&1 &
+  pid=$!; printf '%s' "$pid" >"$IP/gh-login.pid"
+  for (( i = 0; i < 80; i++ )); do
+    code=$(grep -o '[A-Z0-9]\{4\}-[A-Z0-9]\{4\}' "$log" | head -1)
+    [[ -n $code ]] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.25
+  done
+  if [[ -z $code ]]; then
+    kill "$pid" 2>/dev/null; rm -f "$IP/gh-login.pid"
+    p_todo "$(ui_toast "✗ gh sign-in didn't start: $(tail -n1 "$log")")"; return
+  fi
+  p_copy "$code" && copied=" (copied)"
+  for i in xdg-open open; do command -v $i >/dev/null && { $i https://github.com/login/device >/dev/null 2>&1 & break; }; done
+  p_todo "$(ip_fz change-footer "gh sign-in as $a: type $code$copied at github.com/login/device, with the browser signed in as $a")"
+  wait "$pid"; rm -f "$IP/gh-login.pid"
+  if r=$(gh_login_finish "$a" "$prev" "$users"); then r="✓ $r"; else r="✗ ${r^}"; fi
+  if [[ $(ip_get mode) == acct-github ]]; then
+    p_todo "$(ip_join "$(ip_fz reload-sync "$(p_cmd __acctrows github)")" "$(ui_toast "$r")")"
+  else p_todo "$(ui_toast "$r")"; fi
+}
+
 p_copy() {   # text → clipboard
   if command -v wl-copy >/dev/null; then wl-copy <<<"$1"
   elif command -v xclip >/dev/null; then xclip -selection clipboard <<<"$1"
@@ -518,6 +576,7 @@ p_key() {   # key folder/row-key query
       case $k in
         left) echo backward-char ;; right) echo forward-char ;;
         esc) p_to_list ;;
+        alt-l) [[ $kind == github ]] && p_gh_login "$f" ;;
         alt-a) if [[ $kind == claude ]]; then ip_ask "Name of the new Claude profile? (e.g. personal, work)" claude-add "" "name: "
                else ip_ask "GitHub username of the account to add?" gh-user "" "username: "; fi ;;
         ctrl-x)
@@ -547,7 +606,7 @@ p_key_list() {   # key folder
       # the arrows go to the next row first, then the cursor joins them in the same
       # redraw (moving first, fzf would show the cursor before the arrows catch up)
       local -a vis; local q; q=$(ip_get saved_q)
-      if [[ -n $q ]]; then mapfile -t vis < <(tail -n +2 "$IP/shown" | fzf --filter="$q" --delimiter='\t' --with-nth=2 --no-sort | cut -f1)
+      if [[ -n $q ]]; then mapfile -t vis < <(tail -n +2 "$IP/shown" | fzf -i --exact --filter="$q" --delimiter='\t' --with-nth=2 --no-sort | cut -f1)
       else mapfile -t vis < <(tail -n +2 "$IP/shown" | cut -f1); fi
       n=${#vis[@]}; (( n )) || return 0
       for (( i = 0; i < n; i++ )); do [[ ${vis[i]} == "$f" ]] && break; done
@@ -628,6 +687,8 @@ p_confirmed() {   # yes / no
         awk -F'\t' -v f="$f" '$1 != f' "$IP/unsaved" >"$IP/unsaved.new" && mv "$IP/unsaved.new" "$IP/unsaved"
         p_cache; p_to_list "✓ $(tilde "$f"): back to the defaults"
       else p_to_list; fi ;;
+    gh-login)
+      if [[ $1 == yes ]]; then ip_join "$(p_to_acct github)" "$(p_gh_login "${p#* }")"; else p_to_acct github; fi ;;
     claude-rm|github-rm)
       local n=${p#* } kind=${w%-rm}
       if [[ $1 == yes ]]; then
@@ -708,7 +769,7 @@ panel() {   # [folders|claude|github] [folder to add]
   # ↑↓ are the list's own: arrows and cursor move in one redraw (the focus event
   # still covers other moves, like a click). In other modes they just move.
   for k in up down; do binds+=(--bind "$k:transform:$cb $k {1} {q}"); done
-  for k in enter esc y n left right alt-left alt-right tab alt-s alt-a ctrl-x alt-c alt-g alt-y; do
+  for k in enter esc y n left right alt-left alt-right tab alt-s alt-a ctrl-x alt-c alt-g alt-y alt-l; do
     binds+=(--bind "$k:transform:$cb $k {1} {q}")
   done
   FZF_COLUMNS=$(ui_cols) p_render
@@ -767,6 +828,8 @@ case "${1:-}" in
   __rows) p_laid ;;
   __table) p_rows | UI_TABLE_FIELD=2 print_table 2 "$(( ${FZF_PREVIEW_COLUMNS:-60} - 2 ))" | cut -f2- ;;
   __acctrows) p_acct_rows "$2" ;;
+  __ghlogin) p_gh_job "$2" ;;
+  __gh) shift; exec_gh; exec gh "$@" ;;   # the shell's gh function (shell/common.sh)
   __pickrows) p_pick_rows "$2" "$3" ;;
   __key)
     case $2 in

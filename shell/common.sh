@@ -45,6 +45,17 @@ if ! type dex >/dev/null 2>&1 || [ -n "${_work_dex:-}" ]; then
   }
 fi
 
+# gh as the folder's GitHub account (hat), not just gh's active one. gh auth stays
+# as it is (a sign-in can't run with a token set). Skipped if you have your own gh.
+case "$(type gh 2>/dev/null)" in *function*) _work_gh_own=${_work_gh:-1} ;; *) _work_gh_own="" ;; esac
+if [ -z "$_work_gh_own" ] || [ -n "${_work_gh:-}" ]; then
+  _work_gh=1
+  gh() {
+    if [ "${1:-}" = auth ] || ! command -v hat >/dev/null 2>&1; then command gh "$@"; else hat __gh "$@"; fi
+  }
+fi
+unset _work_gh_own
+
 # nvm, loaded lazily: sourcing nvm.sh costs ~0.8s per new terminal. The default
 # node's bin goes straight on PATH (node/npm/npx work at once); the real nvm
 # loads the first time you type `nvm`. If the default can't be resolved
