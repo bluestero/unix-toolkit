@@ -142,7 +142,10 @@ t_foot() {
     (( I_TICK )) || [[ $I_STATE != installed ]] || out+=$'\n'"already set up: $UNDO $I_ID removes it"
     fold -s -w "$w" <<<"$out"
   elif [[ -e $T/dry/$1 ]]; then
-    if [[ -s $T/dry/$1 ]]; then cat "$T/dry/$1"; else echo "nothing to ask: it is set up as it is"; fi
+    # one column for every line: the run's indents dropped, a line with no mark gets a -
+    if [[ -s $T/dry/$1 ]]; then
+      sed -E "s/^ +//; /^(\x1b\[[0-9;]*m)*(✓|!|✗|\?|–|○|◐|⊘)(\x1b\[[0-9;]*m)* /! s/^/${C_DIM}-${C_RESET} /" "$T/dry/$1"
+    else echo "nothing to ask: it is set up as it is"; fi
   else echo "working out what it would do…"; fi
 }
 
