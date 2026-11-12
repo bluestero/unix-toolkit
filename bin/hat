@@ -153,7 +153,7 @@ exec_gh() {   # gives gh the folder's account in this process's environment
   [[ -n $g && $g != *@* && $g != "$(hat_gh_active)" ]] && command -v gh >/dev/null || return 0
   if t=$(gh auth token -u "$g" 2>/dev/null) && [[ -n $t ]]; then export GH_TOKEN=$t
   else
-    warn "gh has no sign-in for $g (hat: alt-g, then alt-l on it), so gh runs signed out here."
+    warn "gh has no sign-in for $g (hat: alt-g, then enter on it), so gh runs signed out here."
     export GH_CONFIG_DIR="$HAT_DIR/no-gh-login"; mkdir -p "$GH_CONFIG_DIR"; unset GH_TOKEN GITHUB_TOKEN
   fi
 }
@@ -450,12 +450,14 @@ p_acct_rows() {   # kind
     done <<<"$(hat_claude_profiles)"
   fi | UI_TABLE_FIELD=2 print_table 3 "$(( ${FZF_COLUMNS:-$(ui_cols)} - 6 ))"
 }
+p_acct_hints() {   # kind
+  if [[ $1 == github ]]; then printf '%s\n%s' "# a GitHub account: commit name and email, and the SSH key GitHub knows it by · GH: the gh command's own sign-in" "enter: sign gh in · alt-a: add · ctrl-x: remove · esc: back to the folders"
+  else printf '%s\n%s' "# a Claude profile: its own sign-in, history and settings (~/.claude-profiles/<name>)" "alt-a: add · ctrl-x: remove · esc: back to the folders"; fi
+}
 p_to_acct() {   # kind [toast]
-  local -a a; local k=$1 note login=""
-  if [[ $k == github ]]; then note="# a GitHub account: commit name and email, and the SSH key GitHub knows it by · GH: the gh command's own sign-in"; login=" · alt-l: sign gh in"
-  else note="# a Claude profile: its own sign-in, history and settings (~/.claude-profiles/<name>)"; fi
+  local -a a; local k=$1
   a=("$(ip_fz reload-sync "$(p_cmd __acctrows "$k")")" "$(ip_back)" "pos(1)" "$(ip_fz change-query "")"
-     "$(ip_fz change-header "$(p_keys "$note"$'\n'"alt-a: add$login · ctrl-x: remove · esc: back to the folders")")"
+     "$(ip_fz change-header "$(p_keys "$(p_acct_hints "$k")")")"
      "$(ip_fz change-prompt "$k> ")" "$(ip_fz change-border-label " hat · $(kind_label "$k")s ")" hide-preview)
   if [[ -n ${2:-} ]]; then a+=("$(ui_toast "$2")"); else a+=("$(ip_fz change-footer " ")"); fi
   ip_set mode "acct-$k"
@@ -576,7 +578,7 @@ p_key() {   # key folder/row-key query
       case $k in
         left) echo backward-char ;; right) echo forward-char ;;
         esc) p_to_list ;;
-        alt-l) [[ $kind == github ]] && p_gh_login "$f" ;;
+        enter) [[ $kind == github ]] && p_gh_login "$f" ;;
         alt-a) if [[ $kind == claude ]]; then ip_ask "Name of the new Claude profile? (e.g. personal, work)" claude-add "" "name: "
                else ip_ask "GitHub username of the account to add?" gh-user "" "username: "; fi ;;
         ctrl-x)
@@ -761,23 +763,28 @@ panel() {   # [folders|claude|github] [folder to add]
   [[ -n ${2:-} ]] && echo "$2" >>"$IP/extras"
   p_cache
   ip_set focus "${2:-$(head -1 "$IP/cells" | cut -f1)}"
-  local cb k start="unbind(y,n)"
+  local cb k start="unbind(y,n)" kind=${1:-folders} label="hat · folders" prompt="folder> " hints=$P_HINTS pos
   cb="$(printf %q "$SELF") __key"
-  [[ ${1:-folders} != folders ]] && start+="+transform($cb open-$1 '' '')"
+  FZF_COLUMNS=$(ui_cols) p_render
+  pos=$(p_pos_of "$(ip_get focus)")
+  if [[ $kind != folders ]]; then   # opens on that list; esc goes back to the folders
+    ip_set mode "acct-$kind"
+    FZF_COLUMNS=$(ui_cols) p_acct_rows "$kind" >"$IP/shown"
+    label="hat · $(kind_label "$kind")s" prompt="$kind> " hints=$(p_acct_hints "$kind") pos=1
+  fi
   local -a binds=(--bind "start:$start" --bind "focus:transform:$cb focus {1} {q}" --bind "resize:transform:$cb resize {1} {q}"
     --bind "result:transform:$cb result {1} {q}")
   # ↑↓ are the list's own: arrows and cursor move in one redraw (the focus event
   # still covers other moves, like a click). In other modes they just move.
   for k in up down; do binds+=(--bind "$k:transform:$cb $k {1} {q}"); done
-  for k in enter esc y n left right alt-left alt-right tab alt-s alt-a ctrl-x alt-c alt-g alt-y alt-l; do
+  for k in enter esc y n left right alt-left alt-right tab alt-s alt-a ctrl-x alt-c alt-g alt-y; do
     binds+=(--bind "$k:transform:$cb $k {1} {q}")
   done
-  FZF_COLUMNS=$(ui_cols) p_render
   cat "$IP/shown" |
-    ui_fzf "hat · folders" --toast --with-shell='bash -c' --delimiter='\t' --with-nth=2 --header-lines=1 --no-sort \
-      --prompt='folder> ' --header="$P_HINTS" --footer=' ' \
+    ui_fzf "$label" --toast --with-shell='bash -c' --delimiter='\t' --with-nth=2 --header-lines=1 --no-sort \
+      --prompt="$prompt" --header="$hints" --footer=' ' \
       --preview="$(printf %q "$SELF") __table" --preview-window='right,60%,hidden' \
-      --bind "load:pos($(p_pos_of "$(ip_get focus)"))+unbind(load)" "${binds[@]}" >/dev/null
+      --bind "load:pos($pos)+unbind(load)" "${binds[@]}" >/dev/null
   return 0
 }
 
@@ -831,10 +838,6 @@ case "${1:-}" in
   __ghlogin) p_gh_job "$2" ;;
   __gh) shift; exec_gh; exec gh "$@" ;;   # the shell's gh function (shell/common.sh)
   __pickrows) p_pick_rows "$2" "$3" ;;
-  __key)
-    case $2 in
-      open-claude|open-github) p_to_acct "${2#open-}" ;;
-      *) p_key "$2" "${3:-}" "${4:-}" ;;
-    esac ;;
+  __key) p_key "$2" "${3:-}" "${4:-}" ;;
   *) ui_unknown hat "$1" ;;
 esac

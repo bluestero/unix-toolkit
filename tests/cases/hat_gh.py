@@ -1,4 +1,4 @@
-"""hat's GitHub accounts list: alt-l signs gh in from the list, which stays open."""
+"""hat's GitHub accounts list: enter signs gh in from the list, which stays open."""
 import os
 
 from term import Term
@@ -32,7 +32,7 @@ def start(sb, browser):
     t.wait_for("~/code/proj")
     t.settle()
     t.key("alt-g")
-    t.wait_for("alt-l")
+    t.wait_for("sign gh in")
     t.settle()
     assert "not signed in" in (t.line_with("me@x.io") or ""), t.text()
     return t
@@ -42,9 +42,9 @@ def active(sb):
     return [l.split(": ")[1] for l in sb.read("~/.config/gh/hosts.yml").splitlines() if l.startswith("    user:")][0]
 
 
-def test_alt_l_signs_gh_in_and_keeps_the_active_account(sb):
+def test_enter_signs_gh_in_and_keeps_the_active_account(sb):
     t = start(sb, "me")
-    t.key("alt-l")                                     # the cursor starts on "me"
+    t.key("enter")                                     # the cursor starts on "me"
     t.wait_for("ABCD-1234")
     assert t.alive(), "the list stays open while gh waits for the browser"
     t.wait_for("✓ gh is signed in as me")
@@ -58,9 +58,23 @@ def test_alt_l_signs_gh_in_and_keeps_the_active_account(sb):
 
 def test_browser_signed_in_as_someone_else_is_undone(sb):
     t = start(sb, "stranger")
-    t.key("alt-l")
+    t.key("enter")
     t.wait_for("signed in as stranger")
     assert t.alive()
     hosts = sb.read("~/.config/gh/hosts.yml")
     assert "stranger" not in hosts and active(sb) == "work", hosts
     assert "not signed in" in (t.line_with("me@x.io") or "")
+
+
+def test_hat_github_opens_on_the_accounts_and_esc_goes_to_the_folders(sb):
+    sb.write("~/.config/hat/github/me.gitconfig", "[user]\n\tname = me\n\temail = me@x.io\n")
+    proj = sb.path("~/code/proj")
+    os.makedirs(proj)
+    t = Term([HAT, "github"], sb.env, cwd=proj)
+    t.wait_for("me@x.io")
+    assert "folder>" not in t.text() and "github>" in t.text(), t.text()
+    t.key("esc")
+    t.wait_for("folder>")
+    t.wait_for("~/code/proj")
+    t.key("esc")
+    assert t.wait_exit() == 0
