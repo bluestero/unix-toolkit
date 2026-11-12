@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Removes parts of the work toolkit. Shows a checklist of what's installed;
-# pick with space, confirm with enter. Safe to run any number of times.
+# pick with tab, confirm with enter. Safe to run any number of times.
 # `./uninstall.sh help` lists the commands. Files that were replaced get their
 # backup put back. Repo files are never deleted.
 set -uo pipefail

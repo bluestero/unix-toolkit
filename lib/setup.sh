@@ -343,7 +343,7 @@ apt_install() {
 # ---------------------------------------------------------- checklist ---
 # checklist "<title>" "<label>"... → sets CHECKLIST (array of chosen indexes).
 # Labels are "name<TAB>description"; a label "## Group" is a heading (not
-# selectable). ↑/↓ or j/k move, space toggles, a toggles all, enter confirms,
+# selectable). ↑/↓ or j/k move, tab toggles, a toggles all, enter confirms,
 # q cancels. CHECKLIST_ON="0 2" pre-ticks those indexes. Uses gum when GUM is set.
 
 checklist() {
@@ -381,8 +381,8 @@ checklist() {
       (( ${#desc} > room )) && desc="${desc:0:$(( room > 1 ? room - 1 : 0 ))}…"
       printf '\r\e[K  %s %s %-15s %s\n' "$ptr" "$mark" "${name:0:15}" "$D$desc$R"
     done
-    local hint="↑ ↓  move    space  select    a  all    enter  confirm    q  cancel"
-    (( ${#hint} > cols - 3 )) && hint="↑↓ move · space select · a all · enter ok · q cancel"
+    local hint="↑ ↓  move    tab  select    a  all    enter  confirm    q  cancel"
+    (( ${#hint} > cols - 3 )) && hint="↑↓ move · tab select · a all · enter ok · q cancel"
     printf '\r\e[K  %s%s%s' "$D" "${hint:0:$(( cols > 3 ? cols - 3 : 0 ))}" "$R"
   }
 
@@ -396,7 +396,7 @@ checklist() {
     case "$key" in
       $'\e[A'|k) _cl_move -1 ;;
       $'\e[B'|j) _cl_move 1 ;;
-      ' ') (( on[cur] = !on[cur] )) ;;
+      $'\t') (( on[cur] = !on[cur] )) ;;
       a) all=1; for (( i = 0; i < n; i++ )); do _cl_head "$i" || (( on[i] )) || all=0; done
          for (( i = 0; i < n; i++ )); do _cl_head "$i" || on[i]=$(( !all )); done ;;
       '') break ;;

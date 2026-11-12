@@ -402,6 +402,21 @@ uninstall_kitty_config() {
 # btop with the toolkit's settings (no black panel, rounded boxes). Its colours are
 # generated from the kitty theme in use (k-theme writes ~/.config/btop/themes/kitty.theme).
 bt="$HOME/.config/btop/btop.conf"; bt_src="$repo/btop/btop.conf"
+# btop can't include a second file and writes its own config when you change a setting in
+# its menu, so it gets a file of its own: the preset with your patch laid over it
+# (tk configs). bt_made keeps the checksum of what the toolkit last wrote.
+bt_patch="$HOME/.config/work-toolkit/patches/btop.conf"; bt_made="$log_dir/originals/configs/btop.made"
+bt_merge() {   # the preset, your patch's "key = value" lines in place of its own (new ones at the end)
+  awk 'function k(l) { sub(/[ \t]*=.*/, "", l); return l }
+    FILENAME == ARGV[1] { if ($0 ~ /^[A-Za-z_]+[ \t]*=/) { if (!(k($0) in p)) o[++n] = k($0); p[k($0)] = $0 }; next }
+    $0 ~ /^[A-Za-z_]+[ \t]*=/ && (k($0) in p) { print p[k($0)]; done[k($0)] = 1; next }
+    { print }
+    END { for (i = 1; i <= n; i++) if (!(o[i] in done)) print p[o[i]] }' \
+    "$([[ -f $bt_patch ]] && echo "$bt_patch" || echo /dev/null)" "${1:-$bt_src}"
+}
+bt_kv() { grep -E '^[A-Za-z_]+[[:space:]]*=' "$@" | sed -E 's/[[:space:]]*=[[:space:]]*/ = /' | sort; }   # the settings alone
+bt_ours() { [[ -f $bt && ! -L $bt && "$(bt_kv "$bt")" == "$(bt_merge | bt_kv)" ]]; }   # the preset (and patch) as written
+bt_build() { mkdir -p "${bt%/*}" "${bt_made%/*}"; rm -f "$bt"; bt_merge >"$bt" && sha256sum "$bt" | cut -d' ' -f1 >"$bt_made"; }
 kth="$(layer_path "$repo" feelkit 2>/dev/null)/bin/k-theme"   # feelkit's; colours follow the theme only when it is there
 label_btop() { echo "btop"; }
 title_btop() { echo "btop system monitor, set up to follow your kitty colour theme"; }
@@ -409,7 +424,7 @@ detail_btop() { echo "btop (apt) if missing; ~/.config/btop/btop.conf -> btop/bt
 state_btop() { NOTE=""
   local n=0
   type -P btop >/dev/null && (( n++ ))
-  linked "$bt" "$bt_src" && (( n++ ))
+  { linked "$bt" "$bt_src" || bt_ours; } && (( n++ ))
   if (( n == 2 )); then STATE=installed; elif (( n )); then STATE=partial; else STATE=missing; fi; }
 install_btop() {
   if ! type -P btop >/dev/null; then
@@ -417,15 +432,25 @@ install_btop() {
       apt_install btop && ok "installed" || { fail "apt failed (see $log_file)"; return 1; }
     else skip; return 0; fi
   fi
-  if ! linked "$bt" "$bt_src"; then
-    ask "Use the toolkit's btop settings? (your own are kept as a backup)" && link_file "$bt" "$bt_src" || { skip; return 0; }
-  else ok "btop settings already linked"; fi
+  if bt_ours; then ok "btop settings already set"
+  elif linked "$bt" "$bt_src"; then   # older installs: a link, so btop's menu wrote into the repo
+    if ask "Give btop a settings file of its own? (now its menu writes into the toolkit's copy)"; then
+      dry || bt_build && ok "done ${D}(your own changes: tk configs → btop → Edit my patch)${R}"
+    else skip; fi
+  else
+    ask "Use the toolkit's btop settings? (your own are kept as a backup)" || { skip; return 0; }
+    dry || { [[ -f $bt && ! -L $bt ]] && backup "$bt" >/dev/null; bt_build; } && ok "set ${D}(your own changes: tk configs → btop → Edit my patch)${R}"
+  fi
   if [[ -x $kth ]]; then dry || "$kth" btop >>"$log_file" 2>&1 && ok "colours follow k-theme ${D}(theme: $("$kth" current 2>/dev/null))${R}"
   else ok "colours follow the kitty theme once feelkit is installed"; fi
 }
 uninstall_btop() {
   rm -f "$HOME/.config/btop/themes/kitty.theme"
   unlink_file "$bt" "$bt_src"
+  if bt_ours; then   # the toolkit's file (one btop has changed since is yours, and stays)
+    rm -f "$bt" "$bt_made"; local b; b=$(latest_backup "$bt")
+    if [[ -n $b ]]; then mv "$b" "$bt"; ok "removed, put back ${b/#$HOME/\~}"; else ok "removed"; fi
+  fi
   if type -P btop >/dev/null && ask "Also remove the btop package? (apt, needs sudo)" n; then
     as_root apt-get remove -y btop >>"$log_file" 2>&1 && ok "package removed" || fail "apt failed (see $log_file)"
   fi
@@ -588,28 +613,22 @@ uninstall_kitty_nautilus() { bash "$repo/kitty/uninstall-kitty-gnome.sh"; }
 # A "look" is a preset of an extension's settings (gnome/<name>/settings.dconf, a dconf dump).
 # Installing asks whether to use it; the settings from before are kept once and the uninstall
 # offers them back, or the app's own defaults (dconf reset).
-# look_applied PATH FILE [IGNORE]: every setting in FILE is the same live (keys matching the
+# look_applied PATH FILE [IGNORE] [NAME]: every setting in FILE is the same live (keys matching the
 # IGNORE regex are skipped: Dash to Panel stores panel keys per monitor).
-look_applied() {
-  python3 -I - "${3:-}" <(dconf dump "$1" 2>/dev/null) <(sed "s#@REPO@#$repo#; s#@HERE@#$(dirname "$2")#" "$2") <<'PY'
-import re, sys
-ign = re.compile(sys.argv[1] or r"(?!)")
-def parse(p):
-    d, sec = {}, ""
-    for line in open(p):
-        line = line.rstrip("\n")
-        if line.startswith("["): sec = line
-        elif "=" in line and not line.startswith("#"):
-            k, v = line.split("=", 1); d[(sec, k)] = v
-    return d
-live, want = parse(sys.argv[2]), parse(sys.argv[3])
-sys.exit(0 if all(live.get(k) == v for k, v in want.items() if not ign.match(k[1])) else 1)
-PY
+# Your patch (~/.config/work-toolkit/patches/<NAME>.dconf) is loaded after the look, so its
+# settings win; the toolkit never writes to it except when you ask (keep my changes as my patch).
+look_patch() { printf '%s' "$HOME/.config/work-toolkit/patches/$1.dconf"; }
+look_file() { sed "s#@REPO@#$repo#; s#@HERE@#$(dirname "$1")#" "$1"; }   # the look, its paths filled in
+look_applied() {   # look_applied PATH FILE [IGNORE] [NAME: with its patch]
+  python3 -I "$repo/lib/dconf_patch.py" applied "${3:-}" <(dconf dump "$1" 2>/dev/null) <(look_file "$2") \
+    ${4:+"$(look_patch "$4")"}
 }
 look_apply() {   # look_apply PATH FILE NAME
   mkdir -p "$orig_dir"
   [[ -f "$orig_dir/$3.dconf" ]] || dconf dump "$1" >"$orig_dir/$3.dconf" 2>/dev/null
-  sed "s#@REPO@#$repo#; s#@HERE@#$(dirname "$2")#" "$2" | dconf load "$1"
+  look_file "$2" | dconf load "$1"
+  [[ -f $(look_patch "$3") ]] && dconf load "$1" <"$(look_patch "$3")"
+  return 0
 }
 look_reset() {   # look_reset PATH NAME: the app's defaults, or your settings from before the toolkit
   dry && return 0
@@ -630,14 +649,18 @@ look_note() {   # look_note PATH BEFORE: what the last action changed, in words
 # how many settings it changed; the settings from just before a change are kept once.
 LOOK_KEEP="Keep my settings"; LOOK_APP="Re-apply the toolkit look"; LOOK_RST="Reset to the app's defaults"
 LOOK_UND="Undo the last change"; LOOK_PRE="Put back my settings from before the toolkit"
-# look_choices NAME: the menu's choices, one per line (the last two only when there is something to go back to)
+LOOK_KPT="Keep my changes as my patch"; LOOK_DRP="Drop my patch"
+# look_choices NAME [differs]: the menu's choices, one per line (the ones after the first three only
+# when there is something for them: settings that differ from the look, a patch, a copy to go back to)
 look_choices() {
   printf '%s\n%s\n%s\n' "$LOOK_KEEP" "$LOOK_APP" "$LOOK_RST"
+  [[ -n ${2:-} ]] && printf '%s\n' "$LOOK_KPT"
+  [[ -f $(look_patch "$1") ]] && printf '%s\n' "$LOOK_DRP"
   grep -q = "$orig_dir/$1.dconf" 2>/dev/null && printf '%s\n' "$LOOK_PRE"
   [[ -f "$orig_dir/$1.last.dconf" ]] && printf '%s\n' "$LOOK_UND"
   return 0
 }
-# look_do PATH FILE NAME NICE PICK: does a choice (no questions; asking first is the caller's job)
+# look_do PATH FILE NAME NICE PICK [IGNORE]: does a choice (no questions; asking first is the caller's job)
 look_do() {
   local path=$1 file=$2 name=$3 nice=$4 pick=$5 last="$orig_dir/$3.last.dconf" first="$orig_dir/$3.dconf" before
   before=$(dconf dump "$path" 2>/dev/null)
@@ -649,6 +672,11 @@ look_do() {
     "$LOOK_PRE") mkdir -p "$orig_dir"; printf '%s\n' "$before" >"$last"
             dconf reset -f "$path"; dconf load "$path" <"$first" &&
               ok "$nice settings back to how they were before the toolkit ${D}($(look_note "$path" "$before"); the menu can undo it)${R}" ;;
+    "$LOOK_KPT") local pf; pf=$(look_patch "$name"); mkdir -p "${pf%/*}"
+            python3 -I "$repo/lib/dconf_patch.py" diff "${6:-}" <(printf '%s\n' "$before") <(look_file "$file") >"$pf" &&
+              ok "$nice: your changes are your patch now ${D}(${pf/#$HOME/\~}; re-applying the look keeps them)${R}" ;;
+    "$LOOK_DRP") mkdir -p "$orig_dir"; printf '%s\n' "$before" >"$last"; mv "$(look_patch "$name")" "$(look_patch "$name").dropped"
+            look_apply "$path" "$file" "$name" && ok "$nice: patch dropped, the plain look is back ${D}($(look_note "$path" "$before"); the menu can undo it)${R}" ;;
     "$LOOK_UND") dconf reset -f "$path"; dconf load "$path" <"$last" && rm -f "$last" &&
               ok "$nice settings back to before the last change ${D}($(look_note "$path" "$before"))${R}" ;;
     *) ok "$nice settings kept" ;;
@@ -656,19 +684,21 @@ look_do() {
 }
 look_menu() {
   local path=$1 file=$2 name=$3 nice=$4 ign=${5:-} state pick q rows
-  if look_applied "$path" "$file" "$ign"; then state="match the toolkit look"; else state="differ from the toolkit look"; fi
+  local differs=""
+  if look_applied "$path" "$file" "$ign" "$name"; then state="match the toolkit look"; else state="differ from the toolkit look"; differs=1; fi
+  [[ -f $(look_patch "$name") ]] && state+=" (with your patch)"
   case "$mode" in
     dry) say "  ${C}?${R} $nice settings $state ${D}(dry run: not asked)${R}"; return 0 ;;
-    yes) look_applied "$path" "$file" "$ign" && { ok "look already applied"; return 0; }; pick=$LOOK_APP ;;
+    yes) look_applied "$path" "$file" "$ign" "$name" && { ok "look already applied"; return 0; }; pick=$LOOK_APP ;;
     *)
       if ! type -P fzf >/dev/null || [[ ! -t 0 ]]; then ok "$nice settings kept"; return 0; fi
-      rows=$(look_choices "$name")
+      rows=$(look_choices "$name" "$differs")
       q="${C_BOLD}$nice settings $state${C_RESET}"
       pick=$(printf '%s\n' "$rows" | ui_fzf "${UI_CONFIRM_LABEL:-settings}" --height=~60% --info=hidden \
         --no-separator --prompt='  ' --header="$q") || pick=$LOOK_KEEP ;;
   esac
   if [[ $pick == "$LOOK_RST" ]]; then ask "Reset $nice to the app's defaults? (the menu can undo it)" n || { skip; return 0; }; fi
-  look_do "$path" "$file" "$name" "$nice" "$pick"
+  look_do "$path" "$file" "$name" "$nice" "$pick" "$ign"
 }
 # A GNOME extension from extensions.gnome.org plus its look. gx_state UUID PATH FILE [IGNORE];
 # gx_install UUID NAME PATH FILE [IGNORE]
@@ -677,7 +707,7 @@ gx_enabled() { gsettings get org.gnome.shell enabled-extensions 2>/dev/null | gr
 gx_state() {
   NOTE=""
   if gx_present "$1" && gx_enabled "$1"; then
-    if look_applied "$2" "$3" "${4:-}"; then STATE=installed; else STATE=partial; NOTE="settings differ from the toolkit's look"; fi
+    if look_applied "$2" "$3" "${4:-}" "$1"; then STATE=installed; else STATE=partial; NOTE="settings differ from the toolkit's look"; fi
   elif gx_present "$1" || gx_enabled "$1"; then STATE=partial; NOTE="installed, not enabled"
   else STATE=missing; fi
 }
@@ -692,7 +722,7 @@ gx_install() {
     dry || ext_list add "$uuid"
     ok "enabled"; warn "log out and back in once (Wayland loads new extensions only at login)"
   fi
-  if look_applied "$3" "$4" "${5:-}"; then ok "look already applied"
+  if look_applied "$3" "$4" "${5:-}" "$uuid"; then ok "look already applied"
   elif ask "Use the toolkit's look for $name? (your current settings are kept for the uninstall)"; then
     look_apply "$3" "$4" "$uuid" && ok "look applied"
   else skip "keeping your settings"; fi

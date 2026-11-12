@@ -44,7 +44,7 @@ def test_every_component_is_on_a_tab(sb):
 
 def test_esc_changes_nothing(sb):
     _, t = start(sb)
-    t.key("space", "right", "enter")
+    t.key("tab", "right", "enter")
     t.wait_for("SETS UP")
     t.key("esc")
     assert t.wait_exit() == 0
@@ -64,7 +64,7 @@ def test_nothing_starts_ticked(sb):
 
 def test_tick_follows_to_the_summary(sb):
     _, t = start(sb)
-    t.key("down", "space")                                # keys, the second row
+    t.key("down", "tab")                                # keys, the second row
     t.wait_for("Summary · 1 to set up")
     t.key("enter")
     t.wait_for("✓ keys ")
@@ -97,7 +97,7 @@ def test_both_bars_ask_and_no_goes_back(sb):
     _, t = start(sb, "--layer=feelkit")
     t.key("right")                                        # GNOME looks: dash2dock, dash-to-panel first
     t.wait(lambda t: "dash2dock" in t.cursor_line(), what="the cursor on dash2dock")
-    t.key("space", "down", "space")
+    t.key("tab", "down", "tab")
     t.wait_for("Summary · 2 to set up")
     t.key("enter")
     t.wait_for("SETS UP")
@@ -116,7 +116,7 @@ def test_both_bars_yes_sets_up(sb):
     _, t = start(sb, "--plain", "--layer=feelkit")
     t.key("right")                                        # GNOME looks: dash2dock, dash-to-panel first
     t.wait(lambda t: "dash2dock" in t.cursor_line(), what="the cursor on dash2dock")
-    t.key("space", "down", "space")
+    t.key("tab", "down", "tab")
     t.wait_for("Summary · 2 to set up")
     t.key("enter")
     t.wait_for("SETS UP")
@@ -129,7 +129,7 @@ def test_both_bars_yes_sets_up(sb):
 
 def test_enter_on_the_summary_sets_up_the_ticked(sb):
     _, t = start(sb, "--plain")
-    t.key("space")                                        # bash
+    t.key("tab")                                        # bash
     t.wait_for("Summary · 1 to set up")
     t.key("enter")
     t.wait_for("✓ bash ")

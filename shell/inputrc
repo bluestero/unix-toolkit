@@ -16,3 +16,5 @@ set mark-symlinked-directories on
 "\e[Z": menu-complete
 "\eOA": history-search-backward
 "\eOB": history-search-forward
+# Your patch (tk configs: edit my patch), last so it wins; this file stays the toolkit's
+$include ~/.config/work-toolkit/patches/inputrc

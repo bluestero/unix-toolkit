@@ -81,3 +81,23 @@ def test_keep_changes_nothing(sb):
     t.key("enter")
     t.wait_for("settings kept")
     assert [c for c in sb.calls("dconf") if not c.startswith("dconf dump")] == []
+
+
+def test_keep_my_changes_as_my_patch(sb):
+    preset = open(os.path.join(os.path.dirname(os.path.dirname(FK)), "gnome/vitals/settings.dconf")).read()
+    assert "hide-zeros=false" in preset
+    sb.write(sb.fix + "/dump", preset.replace("hide-zeros=false", "hide-zeros=true"))
+    sb.fake("dconf", '[ "$1" = dump ] && cat "$TK_FIX/dump"; exit 0')
+    t = start(sb)
+    t.wait_for("your own settings")
+    t.key("enter")
+    t.wait_for("Keep my changes as my patch")
+    t.settle()
+    for _ in range(8):
+        if "Keep my changes as my patch" in (t.cursor_line() or ""):
+            break
+        t.key("down")
+    t.key("enter")
+    t.wait_for("your patch now")
+    t.wait_for("+ my patch")
+    assert sb.read(f"~/.config/work-toolkit/patches/{VITALS}.dconf").strip() == "[/]\nhide-zeros=true"

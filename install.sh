@@ -160,10 +160,10 @@ elif [[ "$mode" == ask && "${WORK_TOOLKIT_PLAIN:-0}" != 1 && $named == 0 ]]; the
   say ""
 fi
 
-# Pick what to set up (nothing ticked: you tick what you want with space). Named components or
+# Pick what to set up (nothing ticked: you tick what you want with tab). Named components or
 # --yes / --dry-run skip the list.
 if [[ "$mode" == ask && $named == 0 ]] && (( ! tabs )); then
-  say "Tick what you want with ${B}space${R}, then ${B}Enter${R} sets it up."
+  say "Tick what you want with ${B}tab${R}, then ${B}Enter${R} sets it up."
   say "${D}Each change still asks first (Enter = yes), and $undo undoes any of it.${R}"
   say ""
   labels=() ids=() prev=""

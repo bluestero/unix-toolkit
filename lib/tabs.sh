@@ -1,5 +1,5 @@
 # The installer's tab view (./install.sh with no components named, fzf 0.63+): one tab
-# per group, then a summary tab. space ticks, ←→ or tab change tabs, enter goes to the
+# per group, then a summary tab. tab ticks, ←→ change tabs, enter goes to the
 # summary and, there, sets up what's ticked; esc leaves with nothing changed.
 # install.sh sources it for tabs_pick; fzf's key callbacks run it as a script
 # (bash lib/tabs.sh <what> <state dir> ...), which loads only lib/ui.sh and lib/inplace.sh.
@@ -46,14 +46,14 @@ tabs_pick() {
   bg=$!
   local cb="bash '$repo/lib/tabs.sh'" k
   local -a binds=()
-  for k in right:1 tab:1 left:-1 btab:-1; do binds+=(--bind="${k%%:*}:transform:$cb go '$T' ${k#*:}"); done
+  for k in right:1 left:-1; do binds+=(--bind="${k%%:*}:transform:$cb go '$T' ${k#*:}"); done
   for k in y n esc; do binds+=(--bind="$k:transform:$cb key '$T' $k {2}"); done
   bash "$repo/lib/tabs.sh" layout "$T"
   ui_fzf "${layer:-work toolkit} · set up" --no-input --delimiter=$'\t' --with-nth=1 <"$T/view" \
       --footer=' ' --with-shell='bash -c' "${binds[@]}" \
       --bind="start:unbind(y,n)+transform:$cb header '$T'" \
       --bind="focus:transform:$cb foot '$T' {2}" \
-      --bind="space:transform:$cb tick '$T' {2} {n}" \
+      --bind="tab:transform:$cb tick '$T' {2} {n}" \
       --bind="enter:transform:$cb key '$T' enter {2}" \
       --bind="resize:transform:$cb go '$T' 0" >/dev/null || rc=$?
   kill "$bg" 2>/dev/null
@@ -122,7 +122,7 @@ t_header() {
   local about keys
   if (( CUR < NT )); then
     about=$(grep -m1 "^${TABS[CUR]}"$'\x1e' "$T/about"); about=${about#*$'\x1e'}
-    keys="←→: tab · space: tick · enter: to the summary · esc: cancel"
+    keys="←→: tab · tab: tick · enter: to the summary · esc: cancel"
   else
     about="What enter sets up. Each change still asks first (Enter = yes); $UNDO undoes any of it."
     keys="←→: tab · enter: set these up · esc: cancel"

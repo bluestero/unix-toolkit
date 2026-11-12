@@ -307,6 +307,7 @@ tk status	ctx, plus how much of the toolkit is set up
 tk doctor	every check from every tool, in one box
 tk install [part...]	./install.sh from anywhere	tk install zsh
 tk uninstall [part...]	./uninstall.sh from anywhere
+tk configs	starship, btop, rofi, kitty, readline, yazi keys: the toolkit's preset, the app's default, what you had before, or undo; your own patch on top of each	patches: ~/.config/work-toolkit/patches · edited preset: you changed the toolkit's copy
 tk update	pull the latest toolkit and layers, show what changed, set up anything new	needs a git repo
 tk layer [ls]	the layers: extra parts from other repos, in layers/<name>
 tk layer add <git-url> [name]	clone a layer, then offer to set up its parts	name: repo name without -toolkit
@@ -326,6 +327,7 @@ case "${1:-}" in
   install)        shift; exec "$ROOT/install.sh" "$@" ;;
   uninstall)      shift; exec "$ROOT/uninstall.sh" "$@" ;;
   update)         cmd_update ;;
+  configs)        shift; exec bash "$ROOT/lib/configs.sh" "$@" ;;
   layer|layers)   shift; cmd_layer "$@" ;;
   version|-v|--version) cmd_version ;;
   __guard)        exec "$ROOT/claude/guard.sh" ;;   # Claude Code's PreToolUse hook (claude-guard)

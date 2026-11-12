@@ -45,3 +45,6 @@ element normal.normal, element alternate.normal { background-color: transparent;
 element selected.normal { background-color: @sel; text-color: @accent; }
 element-icon { size: 22px; }
 element-text { vertical-align: 0.5; text-color: inherit; }
+
+/* Your patch (tk configs: edit my patch), last so it wins; this file stays the toolkit's. */
+@import "~/.config/work-toolkit/patches/rofi.rasi"
