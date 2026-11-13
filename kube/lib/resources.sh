@@ -512,7 +512,8 @@ kitty_tab() {   # title keep-focus|focus kx-args...
   [[ -x "$k" ]] || return 1
   local title="$1" focus="$2"; shift 2
   local -a opt=()
-  [[ "$focus" == keep-focus ]] && opt+=(--keep-focus)
+  # keep-focus (port-forward): opens right after the current tab, not at the end
+  [[ "$focus" == keep-focus ]] && opt+=(--keep-focus --location=after)
   [[ -n "${KUBECONFIG:-}" ]] && opt+=(--env "KUBECONFIG=$KUBECONFIG")
   [[ -n "${AWS_PROFILE:-}" ]] && opt+=(--env "AWS_PROFILE=$AWS_PROFILE")
   "$k" @ --password=kx launch --type=tab --tab-title "$title" "${opt[@]}" "$SELF" "$@" >/dev/null 2>&1
