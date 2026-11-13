@@ -474,7 +474,7 @@ ui_keys_redraw() {
 # ui_fzf_at_least <version>: is the fzf on PATH at least that new? (asked once per run)
 ui_fzf_at_least() {
   [[ -n "${_UI_FZF_VER+x}" ]] || _UI_FZF_VER=$(fzf --version 2>/dev/null | awk '{print $1}')
-  [[ -n "$_UI_FZF_VER" && "$(printf '%s\n%s\n' "$1" "$_UI_FZF_VER" | sort -V | head -1)" == "$1" ]]
+  [[ -n "$_UI_FZF_VER" && "$(printf '%s\n%s\n' "$1" "$_UI_FZF_VER" | sort -V 2>/dev/null | head -1)" == "$1" ]]
 }
 
 # ------------------------------------------------------- sortable tables ---

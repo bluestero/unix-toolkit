@@ -233,23 +233,64 @@ parts_now() {
   )
 }
 
-# Pull the toolkit and every layer, then show each part against how it was before the pull
+# Look for updates to the toolkit and every layer (fetch: nothing changes yet), pull the ones you
+# tick (all ticked; enter pulls them), then show each part against how it was before the pull
 # (install.sh --update, lib/update.sh): what to fix, what's new, what was removed. Nothing
-# changes without asking; --yes / --dry-run go to install.sh.
+# changes without asking. --yes pulls them all; --dry-run and no terminal pull nothing.
 cmd_update() {
   own_repo "$ROOT" ||
     die "the toolkit folder (${ROOT/#$HOME/\~}) isn't a git repo, so there's nothing to update from"
-  local old new d u rc=0
+  local old new d u name n a how=ask rc=0 rows="" layers=0 nsel
+  local -a dirs=() names=() picked=()
+  for a in "$@"; do case $a in -y|--yes) how=yes ;; -n|--dry-run) how=dry ;; esac; done   # the last one wins, as in install.sh
   u=$(mktemp -d); : >"$u/changed"
   info "${C_DIM}Checking what's set up…${C_RESET}"
   parts_now >"$u/before"
-  old=$(version)
-  pull_one "$ROOT" "toolkit" "$u/changed"
-  new=$(version)
-  [[ "$new" != "$old" ]] && ok "tk $old → ${C_BOLD}$new${C_RESET}"
+  info "${C_DIM}Looking for updates…${C_RESET}"
   while IFS= read -r d; do
-    own_repo "$d" && pull_one "$d" "layer $(basename "$d")" "$u/changed"
-  done < <(layer_dirs "$ROOT")
+    [[ $d == "$ROOT" ]] && name=toolkit || name=$(basename "$d")
+    own_repo "$d" && git -C "$d" rev-parse -q --verify '@{u}' >/dev/null || continue   # no remote to update from
+    git -C "$d" fetch -q 2>/dev/null || { warn "$name: couldn't look for updates (offline?)"; continue; }
+    n=$(git -C "$d" rev-list --count 'HEAD..@{u}')
+    (( n )) || { ok "$name: already up to date"; continue; }
+    dirs+=("$d") names+=("$name"); [[ $name == toolkit ]] || layers=1
+    git -C "$d" log --no-merges --format='• %s' 'HEAD..@{u}' | head -n 20 >"$u/log.$name"
+    old=$(version) new=$(git -C "$ROOT" show '@{u}:VERSION' 2>/dev/null | tr -d '[:space:]')
+    a=""; [[ $name == toolkit && -n $new && $new != "$old" ]] && a="$old → $new"
+    rows+="$name"$'\x1f'"$n new commit$( (( n == 1 )) || echo s)"$'\x1f'"$C_DIM$a$C_RESET"$'\t'"$name"$'\n'
+  done < <(printf '%s\n' "$ROOT"; layer_dirs "$ROOT")
+
+  if (( ${#names[@]} )); then
+    if [[ $how == yes ]]; then picked=("${names[@]}")
+    elif [[ $how == ask && -t 0 && -t 1 ]] && type -P fzf >/dev/null; then
+      local note="" foot=()
+      [[ " ${names[*]} " == *" toolkit "* ]] && (( layers )) &&
+        note="# layers may need the newer toolkit: keep it ticked when you pull a layer"$'\n'
+      ui_fzf_at_least 0.63 && foot=(--footer=' ' --bind="focus:transform-footer(cat $u/log.{2})")
+      nsel="$u/nsel"
+      a=$(printf '%s%s' "REPO"$'\x1f'"NEW"$'\x1f'"VERSION"$'\t\n' "$rows" |
+        ui_fzf 'tk update · pull which?' --multi --marker='✓' --header-lines=1 --delimiter=$'\t' --with-nth=1 \
+          --header="${note}tab: tick/untick · ctrl-a: all/none · enter: pull the ticked · esc: pull nothing" \
+          --bind='load:select-all+first,ctrl-a:toggle-all' "${foot[@]}" \
+          --bind="enter:execute-silent(echo \$FZF_SELECT_COUNT >$nsel)+accept" | cut -f2) ||
+        { rm -rf "$u"; info "Cancelled. Nothing pulled."; return 0; }
+      mapfile -t picked <<<"$a"
+      [[ $(cat "$nsel" 2>/dev/null) == 0 ]] && picked=()   # nothing ticked: fzf hands back the cursor's row
+    else   # no terminal to pick in, or --dry-run: say what's there, pull nothing
+      printf '%s' "$rows" | cut -f1 | { printf '%s\n' "REPO"$'\x1f'"NEW"$'\x1f'"VERSION"; cat; } |
+        ui_table "tk update" "${#names[@]} with updates" >&2
+      for name in "${names[@]}"; do sed "s/^/  $name: /" "$u/log.$name" >&2; done
+      info "Nothing pulled: ${C_BOLD}tk update${C_RESET} in a terminal picks what to pull; --yes pulls them all"
+    fi
+    for d in "${dirs[@]}"; do
+      [[ $d == "$ROOT" ]] && name=toolkit || name=$(basename "$d")
+      if [[ " ${picked[*]} " == *" $name "* ]]; then
+        old=$(version)
+        pull_one "$d" "$([[ $name == toolkit ]] || echo "layer ")$name" "$u/changed"
+        [[ $name == toolkit && $(version) != "$old" ]] && ok "tk $old → ${C_BOLD}$(version)${C_RESET}"
+      elif [[ $how == ask && -t 0 && -t 1 ]]; then info "${C_DIM}$name: not pulled (tk update again any time)${C_RESET}"; fi
+    done
+  fi
   "$ROOT/install.sh" --update="$u" "$@" || rc=$?
   rm -rf "$u"
   return "$rc"
@@ -328,7 +369,7 @@ tk doctor	every check from every tool, in one box
 tk install [part...]	./install.sh from anywhere	tk install zsh
 tk uninstall [part...]	./uninstall.sh from anywhere
 tk configs	starship, btop, rofi, kitty, readline, yazi keys: the toolkit's preset, the app's default, what you had before, or undo; your own patch on top of each	patches: ~/.config/work-toolkit/patches · edited preset: you changed the toolkit's copy
-tk update	pull the latest toolkit and layers, then each part: up to date, needs a fix, new or removed; fixes what you tick	needs a git repo
+tk update	what's new in the toolkit and each layer (their commits); pulls the ones you tick, then each part: up to date, needs a fix, new or removed; fixes what you tick	--yes pulls all; no terminal: pulls nothing
 tk layer [ls]	the layers: extra parts from other repos, in layers/<name>
 tk layer add <git-url> [name]	clone a layer, then offer to set up its parts	name: repo name without -toolkit
 tk layer rm <name>	delete a layer (only when nothing in it is unpushed)

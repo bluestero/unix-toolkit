@@ -74,6 +74,29 @@ def push_v2(sb):
     git(sb, "push", "-q", sb.root + "/demo.git", "main", cwd=d)
 
 
+def push_toolkit(sb):
+    """Upstream toolkit: one new commit (a note in the README)."""
+    d = sb.root + "/tk-src"
+    with open(d + "/README.md", "a") as fh:
+        fh.write("\nnew\n")
+    git(sb, "commit", "-qam", "toolkit v2", cwd=d)
+    git(sb, "push", "-q", sb.root + "/tk.git", "main", cwd=d)
+
+
+def head(sb, d):
+    return subprocess.run(["git", "rev-parse", "HEAD"], cwd=d, env=sb.env, capture_output=True, text=True).stdout
+
+
+def pick(sb, repo, *keys):
+    """tk update up to its repo list, then the keys; returns the terminal."""
+    t = Term([repo + "/bin/tk", "update"], sb.env, cols=140, rows=34, cwd=sb.home)
+    t.wait_for("pull which?", timeout=60)
+    t.settle()
+    if keys:
+        t.key(*keys)
+    return t
+
+
 def run(sb, *args):
     p = subprocess.run([*args], env=sb.env, cwd=sb.home, capture_output=True, text=True, timeout=120,
                        stdin=subprocess.DEVNULL)
@@ -112,7 +135,9 @@ def set_up_v1(sb):
 def test_update_shows_where_things_stand(sb):
     repo = set_up_v1(sb)
     push_v2(sb)
-    t = Term([repo + "/bin/tk", "update"], sb.env, cols=140, rows=34, cwd=sb.home)
+    t = pick(sb, repo)
+    assert "demo" in t.text() and "1 new commit" in t.text() and "update and" not in t.text(), t.text()
+    t.key("enter")                                               # all ticked: pull them
     t.wait_for("Summary", timeout=60)
     t.settle()
     screen = t.text()
@@ -147,13 +172,39 @@ def test_update_twice_changes_nothing_the_second_time(sb):
     assert snapshot(sb) == before
 
 
-def test_update_without_a_terminal_only_reports(sb):
+def test_update_without_a_terminal_pulls_nothing(sb):
     repo = set_up_v1(sb)
     push_v2(sb)
+    before = head(sb, repo + "/layers/demo")
     code, out = run(sb, repo + "/bin/tk", "update")
     assert code == 0, out
-    assert "needs a fix" in out and "removed upstream" in out and "in a terminal" in out, out
+    assert "demo" in out and "1 new commit" in out and "in a terminal" in out and "• v2" in out, out
+    assert head(sb, repo + "/layers/demo") == before, "nothing pulled without asking"
     assert set(bin_links(sb)) == {"old-name", "gone-cmd", "same-cmd"}   # nothing changed
+
+
+def test_held_back_repo_stays_where_it_was(sb):
+    repo = set_up_v1(sb)
+    push_v2(sb)
+    push_toolkit(sb)
+    tk0, demo0 = head(sb, repo), head(sb, repo + "/layers/demo")
+    t = pick(sb, repo)
+    assert "layers may need the newer toolkit" in t.text(), t.text()
+    t.key("down", "tab", "enter")                                # untick demo (second row), pull the toolkit
+    assert t.wait_exit() == 0                                    # (the toolkit's pull changes no part: nothing to ask)
+    assert "demo: not pulled" in t.text(), t.text()
+    assert head(sb, repo) != tk0, "the toolkit was ticked: pulled"
+    assert head(sb, repo + "/layers/demo") == demo0, "demo was unticked: left as it was"
+
+
+def test_esc_on_the_repo_list_pulls_nothing(sb):
+    repo = set_up_v1(sb)
+    push_v2(sb)
+    demo0 = head(sb, repo + "/layers/demo")
+    t = pick(sb, repo, "esc")
+    assert t.wait_exit() == 0
+    assert "Nothing pulled" in t.text(), t.text()
+    assert head(sb, repo + "/layers/demo") == demo0
 
 
 def test_install_twice_gives_the_same_result(sb):

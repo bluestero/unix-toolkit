@@ -1400,7 +1400,7 @@ claude_dirs() {   # every profile folder, one per line (none there yet: where cl
   local d
   for d in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude" "${CLAUDE_PROFILES_DIR:-$HOME/.claude-profiles}"/*/; do
     [[ -n $d && -d $d ]] && readlink -m "$d"
-  done | awk '!seen[$0]++' | grep . || { type -P claude >/dev/null && echo "$claude_dir"; }
+  done | awk '!seen[$0]++' | grep . || { type -P claude >/dev/null && echo "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"; }
   return 0
 }
 # claude_each <command...>: runs it once per profile, with claude_dir, ch_settings and cg_file set to it
