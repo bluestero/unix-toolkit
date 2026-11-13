@@ -17,7 +17,8 @@
 # plus lib/inplace.sh's files (the overlap question asks in the list's header).
 
 # tabs_pick: shows wanted (all) with todo tickable; sets todo to the ticked ones.
-# 1 = cancelled. Needs install.sh's wanted, todo, ST/NT/ND (state, note, needs per id), again, undo, layer.
+# 1 = cancelled. Needs install.sh's wanted, todo, ST/NT/ND (state, note, needs per id), again, undo, layer,
+# and preticked: what starts ticked (only tk update ticks anything).
 tabs_pick() {
   local T id g bg rc=0 on
   local -a picked=()
@@ -32,16 +33,22 @@ tabs_pick() {
   for id in "${wanted[@]}"; do
     g=$(group_of "$id")
     grep -qxF "$g" "$T/tabs" || { echo "$g" >>"$T/tabs"; printf '%s\x1e%s\n' "$g" "${GROUP_ABOUT[$g]:-}" >>"$T/about"; }
-    on=0; [[ " ${todo[*]} " == *" $id "* ]] && on=1   # can be ticked; nothing starts ticked
+    on=0; [[ " ${todo[*]} " == *" $id "* ]] && on=1   # can be ticked
+    [[ " ${preticked[*]} " == *" $id "* ]] && echo "$id" >>"$T/on"
     [[ ${ST[$id]} == needs ]] && printf '%s\t%s\n' "$id" "${ND[$id]}" >>"$T/needs"   # ticking it ticks these
     printf '%s\x1e' "$id" "$g" "$on" "${ST[$id]}" "$(badge "${ST[$id]}" "${ND[$id]}" "${NT[$id]}")" "$("$(fn label "$id")")" \
       "$("$(fn title "$id")")" "$("$(fn detail "$id")")" >>"$T/info"
     printf '%s\n' "${NT[$id]}" >>"$T/info"
   done
+  # tk update opens on the first tab with something to do
+  if [[ -n ${update:-} ]] && (( ${#todo[@]} )); then
+    grep -nxF "$(group_of "${todo[0]}")" "$T/tabs" | cut -d: -f1 | awk '{ print $1 - 1 }' >"$T/cur"
+  fi
   # what --dry-run would print for each, for the summary's footer (questions not asked)
   ( log_file=/dev/null mode=dry
     for id in "${todo[@]}"; do
-      "$(fn install "$id")" </dev/null 2>&1 | grep -v -- '– skipped' >"$T/dry/$id.part"; mv "$T/dry/$id.part" "$T/dry/$id"
+      { [[ -n ${update:-} && ! -v U_GONE[$id] ]] && u_clean "$id"   # tk update: its dead links go first
+        "$(fn install "$id")"; } </dev/null 2>&1 | grep -v -- '– skipped' >"$T/dry/$id.part"; mv "$T/dry/$id.part" "$T/dry/$id"
     done ) >/dev/null 2>&1 &
   bg=$!
   local cb="bash '$repo/lib/tabs.sh'" k
@@ -49,7 +56,8 @@ tabs_pick() {
   for k in right:1 left:-1; do binds+=(--bind="${k%%:*}:transform:$cb go '$T' ${k#*:}"); done
   for k in y n esc; do binds+=(--bind="$k:transform:$cb key '$T' $k {2}"); done
   bash "$repo/lib/tabs.sh" layout "$T"
-  ui_fzf "${layer:-work toolkit} · set up" --no-input --delimiter=$'\t' --with-nth=1 <"$T/view" \
+  local what="set up"; [[ -n ${update:-} ]] && what=update
+  ui_fzf "${layer:-work toolkit} · $what" --no-input --delimiter=$'\t' --with-nth=1 <"$T/view" \
       --footer=' ' --with-shell='bash -c' "${binds[@]}" \
       --bind="start:unbind(y,n)+transform:$cb header '$T'" \
       --bind="focus:transform:$cb foot '$T' {2}" \

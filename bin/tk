@@ -208,7 +208,8 @@ cmd_version() {
 # and git would otherwise answer for the toolkit repo around it)
 own_repo() { [[ "$(git -C "$1" rev-parse --show-toplevel 2>/dev/null)" == "$(cd "$1" && pwd -P)" ]]; }
 
-# pull_one <dir> <name>: pull it, say what changed; returns 0 if anything did
+# pull_one <dir> <name> <changed file>: pull it, say what changed, add the changed files
+# (full paths) to <changed file>
 pull_one() {
   local before
   before=$(git -C "$1" rev-parse HEAD)
@@ -216,25 +217,42 @@ pull_one() {
   [[ "$(git -C "$1" rev-parse HEAD)" == "$before" ]] && { ok "$2: already up to date"; return 1; }
   ok "$2: updated"
   git -C "$1" log --no-merges --format='  • %s' "$before..HEAD" | head -n 20 >&2
+  git -C "$1" diff --name-only "$before" HEAD | sed "s#^#$1/#" >>"$3"
 }
 
+# parts_now: "id repo state" for every installer part, the standalone layers' too
+parts_now() {
+  (
+    repo=$ROOT mode=dry details=0
+    . "$ROOT/lib/setup.sh" >/dev/null 2>&1
+    . "$ROOT/lib/components.sh" >/dev/null 2>&1
+    for id in "${COMPONENTS[@]}"; do
+      component_state "$id" >/dev/null 2>&1
+      printf '%s %s %s\n' "$id" "$(repo_of "$id")" "$STATE"
+    done
+  )
+}
+
+# Pull the toolkit and every layer, then show each part against how it was before the pull
+# (install.sh --update, lib/update.sh): what to fix, what's new, what was removed. Nothing
+# changes without asking; --yes / --dry-run go to install.sh.
 cmd_update() {
   own_repo "$ROOT" ||
     die "the toolkit folder (${ROOT/#$HOME/\~}) isn't a git repo, so there's nothing to update from"
-  local old new changed=0 d
+  local old new d u rc=0
+  u=$(mktemp -d); : >"$u/changed"
+  info "${C_DIM}Checking what's set up…${C_RESET}"
+  parts_now >"$u/before"
   old=$(version)
-  pull_one "$ROOT" "toolkit" && changed=1
+  pull_one "$ROOT" "toolkit" "$u/changed"
   new=$(version)
   [[ "$new" != "$old" ]] && ok "tk $old → ${C_BOLD}$new${C_RESET}"
   while IFS= read -r d; do
-    own_repo "$d" || continue
-    if [[ -f $d/standalone ]]; then   # set up on its own: say how, don't run it
-      pull_one "$d" "layer $(basename "$d")" && info "${C_DIM}New in $(basename "$d")? $(head -1 "$d/standalone") install sets it up${C_RESET}"
-    else pull_one "$d" "layer $(basename "$d")" && changed=1; fi
+    own_repo "$d" && pull_one "$d" "layer $(basename "$d")" "$u/changed"
   done < <(layer_dirs "$ROOT")
-  (( changed )) || return 0
-  info "${C_DIM}Checking for new parts to set up…${C_RESET}"
-  "$ROOT/install.sh"
+  "$ROOT/install.sh" --update="$u" "$@" || rc=$?
+  rm -rf "$u"
+  return "$rc"
 }
 
 # ---------------------------------------------------------------- layers ---
@@ -308,7 +326,7 @@ tk doctor	every check from every tool, in one box
 tk install [part...]	./install.sh from anywhere	tk install zsh
 tk uninstall [part...]	./uninstall.sh from anywhere
 tk configs	starship, btop, rofi, kitty, readline, yazi keys: the toolkit's preset, the app's default, what you had before, or undo; your own patch on top of each	patches: ~/.config/work-toolkit/patches · edited preset: you changed the toolkit's copy
-tk update	pull the latest toolkit and layers, show what changed, set up anything new	needs a git repo
+tk update	pull the latest toolkit and layers, then each part: up to date, needs a fix, new or removed; fixes what you tick	needs a git repo
 tk layer [ls]	the layers: extra parts from other repos, in layers/<name>
 tk layer add <git-url> [name]	clone a layer, then offer to set up its parts	name: repo name without -toolkit
 tk layer rm <name>	delete a layer (only when nothing in it is unpushed)
@@ -326,7 +344,7 @@ case "${1:-}" in
   doctor)         cmd_doctor ;;
   install)        shift; exec "$ROOT/install.sh" "$@" ;;
   uninstall)      shift; exec "$ROOT/uninstall.sh" "$@" ;;
-  update)         cmd_update ;;
+  update)         shift; cmd_update "$@" ;;
   configs)        shift; exec bash "$ROOT/lib/configs.sh" "$@" ;;
   layer|layers)   shift; cmd_layer "$@" ;;
   version|-v|--version) cmd_version ;;

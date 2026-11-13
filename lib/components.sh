@@ -218,7 +218,7 @@ install_commands() {
 uninstall_commands() {
   local b
   for b in "${cmd_bins[@]}"; do
-    linked "$HOME/.local/bin/${b##*/}" "$repo/$b" && rm -f "$HOME/.local/bin/${b##*/}" && ok "removed ${b##*/}"
+    points_at "$HOME/.local/bin/${b##*/}" "$repo/$b" && rm -f "$HOME/.local/bin/${b##*/}" && ok "removed ${b##*/}"
   done
   return 0
 }
@@ -394,7 +394,7 @@ install_kitty_config() { linked "$kc" "$kc_src" && { ok "already linked"; return
   fi
   ask "Link kitty.conf to the repo copy?" && link_file "$kc" "$kc_src" || skip; }
 uninstall_kitty_config() {
-  linked "$kc" "$kc_src" || return 0
+  points_at "$kc" "$kc_src" || return 0
   rm -f "$kc"
   local b; b=$(latest_backup "$kc")
   if [[ -n "$b" ]]; then mv "$b" "$kc"; ok "unlinked, put back ${b/#$HOME/\~}"
@@ -812,14 +812,9 @@ install_window_calls() {
     else rm -f "$tmp"; fail "download or install failed (see the log)"; return; fi
     rm -f "$tmp"
   fi
-  # `gnome-extensions enable` can't see it until GNOME reloads, so add it to the list directly.
-  python3 -I - "$wc_uuid" <<'PY'
-import ast, subprocess, sys
-cur = subprocess.run(["gsettings", "get", "org.gnome.shell", "enabled-extensions"], capture_output=True, text=True).stdout.strip()
-lst = ast.literal_eval(cur.removeprefix("@as ")) if cur else []
-if sys.argv[1] not in lst:
-    subprocess.run(["gsettings", "set", "org.gnome.shell", "enabled-extensions", str(lst + [sys.argv[1]])], check=True)
-PY
+  # `gnome-extensions enable` can't see it until GNOME reloads, so add it to the list directly
+  # (and off the disabled list, where an uninstall leaves it).
+  dry || ext_list add "$wc_uuid"
   ok "enabled"
   warn "log out and back in once (Wayland loads new extensions only at login)"
 }

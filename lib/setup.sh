@@ -245,8 +245,36 @@ latest_backup() {
   printf '%s' "$newest"
 }
 
-# linked <link> <target>: is <link> a symlink that resolves to <target>?
-linked() { [[ -L "$1" && "$(readlink -f "$1")" == "$(readlink -f "$2")" ]]; }
+# points_at <link> <target>: is <link> a symlink to <target> (there or not)?
+points_at() { [[ -L "$1" && "$(readlink -m "$1")" == "$(readlink -m "$2")" ]]; }
+# linked <link> <target>: is <link> a symlink to <target>, and is <target> there?
+linked() { points_at "$1" "$2" && [[ -e "$1" ]]; }
+
+# Every link the installer makes is recorded with the part that made it ("part TAB link TAB
+# target" per line), so tk update can tell when one is left pointing nowhere.
+links_file="$log_dir/links"
+link_note() {
+  local tmp; tmp=$(mktemp)
+  { grep -vF $'\t'"$1"$'\t' "$links_file" 2>/dev/null; printf '%s\t%s\t%s\n' "${TK_PART:-}" "$1" "$2"; } >"$tmp"
+  mv "$tmp" "$links_file"
+}
+# link_records: that record, plus the "link" lines of setup.log (installs from before the
+# record; the part is the one whose heading came last)
+link_records() {
+  awk '/^=== / { p = "" }
+    /^link .* -> / { print p "\t" $2 "\t" $4; next }
+    /^[^ ].*  [a-z0-9-]+ · / { s = $0; sub(/ · .*/, "", s); n = split(s, a, " "); p = a[n] }' "$log_file" 2>/dev/null
+  cat "$links_file" 2>/dev/null
+  return 0
+}
+# leftover_links: "part TAB link TAB target" for each link the installer made that still points
+# where it did, at something that is gone (renamed, moved or removed since)
+leftover_links() {
+  local p l t
+  link_records | while IFS=$'\t' read -r p l t; do
+    [[ -L $l && ! -e $l && "$(readlink "$l")" == "$t" ]] && printf '%s\t%s\t%s\n' "$p" "$l" "$t"
+  done | awk -F '\t' '!seen[$2]++'
+}
 
 # link_file <link> <target>: point <link> at <target>, backing up a real file first.
 link_file() {
@@ -256,6 +284,7 @@ link_file() {
   [[ -f "$link" && ! -L "$link" ]] && b=$(backup "$link")
   ln -sfn "$target" "$link" || return 1
   logf "link $link -> $target${b:+ (backup: $b)}"
+  link_note "$link" "$target"
   ok "linked${b:+ (old file kept as ${b/#$HOME/\~})}"
 }
 
@@ -263,7 +292,7 @@ link_file() {
 # back the newest backup if there is one.
 unlink_file() {
   local link="$1" target="$2" b
-  linked "$link" "$target" || return 0
+  points_at "$link" "$target" || return 0
   rm -f "$link"
   b=$(latest_backup "$link")
   if [[ -n "$b" ]]; then mv "$b" "$link"; ok "removed, put back ${b/#$HOME/\~}"

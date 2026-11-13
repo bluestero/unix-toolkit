@@ -6,7 +6,7 @@
 set -uo pipefail
 
 repo="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-mode=ask details=0 list=0 help=0 layer=""
+mode=ask details=0 list=0 help=0 layer="" update=""
 wanted=()
 for arg in "$@"; do
   case "$arg" in
@@ -17,6 +17,7 @@ for arg in "$@"; do
     -d|--details)   details=1 ;;
     -p|--plain)     export WORK_TOOLKIT_PLAIN=1 ;;
     --layer=*)      layer=${arg#--layer=} ;;
+    --update=*)     update=${arg#--update=} ;;   # tk update: what the pull changed (lib/update.sh)
     -*) printf '✗ unknown option %s · see: ./install.sh help\n' "$arg" >&2; exit 2 ;;
     *)  wanted+=("$arg") ;;
   esac
@@ -28,6 +29,8 @@ setup_phase=install   # lets lib/setup.sh keep your originals (see "originals" t
 . "$repo/lib/setup.sh"
 . "$repo/lib/components.sh"
 . "$repo/lib/tabs.sh"
+preticked=()
+[[ -n $update ]] && . "$repo/lib/update.sh"
 
 if (( help )); then
   ui_help ./install.sh "set up the work toolkit" <<'EOF'
@@ -54,6 +57,7 @@ fi
 if [[ -n $layer ]]; then
   layer_path "$repo" "$layer" >/dev/null || { printf '✗ no layer %s · see: tk layer ls\n' "'$layer'" >&2; exit 2; }
   mapfile -t allowed < <(layer_parts "$layer")
+elif [[ -n $update ]]; then allowed=("${COMPONENTS[@]}")   # tk update: every repo's parts, standalone layers' too
 else mapfile -t allowed < <(main_parts); fi
 for w in "${wanted[@]}"; do
   [[ " ${allowed[*]} " == *" $w "* ]] && continue
@@ -68,6 +72,8 @@ named=${#wanted[@]}
 again=./install.sh undo=./uninstall.sh
 [[ -n $layer && -n ${STANDALONE[$layer]:-} ]] && again="${STANDALONE[$layer]} install" undo="${STANDALONE[$layer]} uninstall"
 
+# tk update with no terminal: where things stand, and nothing changed
+[[ -n $update && "$mode" == ask && ! -t 0 ]] && list=1
 if [[ "$mode" == ask && $list == 0 && ! -t 0 ]]; then
   echo "This installer asks before each change, but there's no terminal to ask in."
   echo "Run it in a terminal, or use --dry-run to preview / --yes to accept everything. (./install.sh ls just lists.)"
@@ -81,6 +87,12 @@ badge() {   # badge <state> [what it needs] [note]
     missing)   printf '%s○ not installed%s' "$Y" "$R" ;;
     needs)     printf '%s○ needs %s%s' "$Y" "${2// /, }" "$R" ;;
     unsupported) printf '%s⊘ not supported here%s' "$D" "$R" ;;
+    fix)       printf '%s◐ needs a fix%s' "$Y" "$R" ;;   # tk update's (lib/update.sh)
+    new)       printf '%s○ new%s' "$Y" "$R" ;;
+    removed)   printf '%s✗ removed upstream%s' "$Y" "$R" ;;
+    gone)      printf '%s– removed upstream%s' "$D" "$R" ;;
+    updated)   printf '%s✓ updated%s' "$G" "$R" ;;
+    current)   printf '%s✓ up to date%s' "$G" "$R" ;;
     *) if [[ ${3:-} == "needs "* ]]; then printf '%s– %s%s' "$D" "${3%%,*}" "$R"; else printf '%s– n/a%s' "$D" "$R"; fi ;;
   esac
 }
@@ -90,10 +102,12 @@ logf ""; logf "=== install $ts ($mode) ${wanted[*]}"
 todo=() prev="" table=""
 if (( list )); then table+="${B}COMPONENT${R}"$'\x1f'"${B}KIT${R}"$'\x1f'"${B}STATE${R}"$'\x1f'"${B}NOTE${R}"$'\n'
 else table+="${B}COMPONENT${R}"$'\x1f'"${B}STATE${R}"$'\x1f'"${B}NOTE${R}"$'\n'; fi
-skipped=0
+skipped=0 shown=()
 declare -A ST=() NT=() ND=()   # each one's state, note and the parts it needs first, for the tabs
 for id in "${wanted[@]}"; do
-  component_state "$id"; ST[$id]=$STATE NT[$id]=$NOTE ND[$id]=$NEED
+  component_state "$id"
+  [[ -z $update ]] || update_status "$id" || continue
+  ST[$id]=$STATE NT[$id]=$NOTE ND[$id]=$NEED; shown+=("$id")
   [[ "$STATE" == unsupported ]] && (( skipped++ ))
   if (( ! named )) && [[ "$(group_of "$id")" != "$prev" ]]; then
     [[ -n "$prev" ]] && table+=$'\n'
@@ -101,10 +115,11 @@ for id in "${wanted[@]}"; do
   fi
   if (( list )); then table+="  $id"$'\x1f'"$D$(repo_of "$id")$R"$'\x1f'"$(badge "$STATE" "$NEED" "$NOTE")"$'\x1f'"$D${NOTE}$R"$'\n'
   else table+="  $id"$'\x1f'"$(badge "$STATE" "$NEED" "$NOTE")"$'\x1f'"$D${NOTE}$R"$'\n'; fi
-  [[ "$STATE" == missing || "$STATE" == partial || "$STATE" == needs ]] && todo+=("$id")
+  [[ "$STATE" == missing || "$STATE" == partial || "$STATE" == needs || "$STATE" == fix || "$STATE" == new || "$STATE" == removed ]] && todo+=("$id")
   # named on the command line and installed already: still offer its settings menu (keep / look / defaults)
   (( named )) && [[ "$STATE" == installed && " ${LOOK_PARTS[*]} " == *" $id "* ]] && todo+=("$id")
 done
+[[ -n $update ]] && wanted=("${shown[@]}")   # tk update shows only parts with something to say
 # Naming only installed look components (their settings menu): no table, heading or summary, just the menu.
 quick=0
 if (( named )) && (( ${#todo[@]} == named )); then
@@ -121,19 +136,21 @@ fi
 # set up (to look through); else the table and the checklist below.
 tabs=0
 [[ "$mode" == ask && $named == 0 && $list == 0 && -t 1 ]] && ui_fzf_at_least 0.63 && tabs=1
+[[ -n $update ]] && (( ! ${#todo[@]} )) && tabs=0   # tk update with nothing to do: just the table
 printf '%s' "$table" | print_table 3 | sed 's/\x1b\[[0-9;]*m//g' >>"$log_file"
 if (( ! tabs )); then
   say ""
-  if (( ${#todo[@]} )); then right="${#todo[@]} to set up"; else right="${G}all set${R}"; fi
+  if (( ${#todo[@]} )); then right="${#todo[@]} to $([[ -n $update ]] && echo look at || echo set up)"; else right="${G}all set${R}"; fi
   printf '%s' "$table" | ui_table "work toolkit" "$right"
   # Which machine this is, and what that rules out (the reasons are in the NOTE column).
   say "${D}This machine: $OS_NAME · $DESKTOP_NAME · ${PKG_MGR/none/no package manager}${R}"
   (( skipped )) && say "${D}$skipped component(s) can't run here and are skipped (⊘ above, with the reason).${R}"
-  (( list )) && exit 0
+  (( list )) && { [[ -n $update ]] && (( ${#todo[@]} )) && say "Run ${B}tk update${R} in a terminal to fix these."; exit 0; }
   say ""
 fi
 if (( ${#todo[@]} == 0 && ! tabs )); then
-  if (( skipped == ${#wanted[@]} )); then say "None of these can run on this machine. Nothing to do."
+  if [[ -n $update ]]; then say "Everything is up to date. Nothing to do."
+  elif (( skipped == ${#wanted[@]} )); then say "None of these can run on this machine. Nothing to do."
   else say "Everything is already set up. Nothing to do."; fi
   exit 0
 fi
@@ -162,6 +179,8 @@ fi
 
 # Pick what to set up (nothing ticked: you tick what you want with tab). Named components or
 # --yes / --dry-run skip the list.
+# tk update --yes / --dry-run: what it would tick
+[[ -n $update && "$mode" != ask ]] && todo=("${preticked[@]}")
 if [[ "$mode" == ask && $named == 0 ]] && (( ! tabs )); then
   say "Tick what you want with ${B}tab${R}, then ${B}Enter${R} sets it up."
   say "${D}Each change still asks first (Enter = yes), and $undo undoes any of it.${R}"
@@ -171,6 +190,7 @@ if [[ "$mode" == ask && $named == 0 ]] && (( ! tabs )); then
     if [[ "$(group_of "$id")" != "$prev" ]]; then
       prev=$(group_of "$id"); labels+=("## $prev"); ids+=("")
     fi
+    [[ " ${preticked[*]} " == *" $id "* ]] && CHECKLIST_ON+="${#labels[@]} "
     labels+=("$id"$'\t'"$("$(fn title "$id")")"); ids+=("$id")
   done
   checklist "Pick what to set up:" "${labels[@]}" || { say "Cancelled. Nothing changed."; exit 0; }
@@ -205,6 +225,10 @@ for id in "${todo[@]}"; do
       continue
     fi
   fi
+  TK_PART=$id   # links it makes are recorded as its (lib/setup.sh)
+  if [[ -n $update && ! -v U_GONE[$id] ]] && u_dead "$id" | grep -q .; then   # links it left pointing nowhere first
+    u_clean "$id"; component_state "$id"; [[ $STATE == installed ]] && continue
+  fi
   "$(fn install "$id")"
 done
 
@@ -219,7 +243,7 @@ summary=""
 for id in "${todo[@]}"; do
   component_state "$id"
   case "$STATE" in
-    installed) mark="${G}✓${R}" what="ready" ;;
+    installed) mark="${G}✓${R}" what="ready"; [[ -n $update && -v U_GONE[$id] ]] && what="cleaned up" ;;
     partial)   mark="${Y}◐${R}" what="partly done · $again $id finishes it" ;;
     *)         mark="${D}○${R}" what="skipped · $again $id any time" ;;
   esac
