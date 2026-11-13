@@ -302,7 +302,9 @@ layer_rm() {
   else
     warn "layers/$name isn't a git clone, so deleting it can't be undone"
   fi
-  info "${C_DIM}Parts it set up stay set up; to remove them first: tk uninstall${C_RESET}"
+  local undo="tk uninstall --layer=$name"
+  [[ -f $dir/standalone ]] && undo="$(head -1 "$dir/standalone") uninstall"   # set up on its own (fk uninstall)
+  info "${C_DIM}Parts it set up stay set up; to remove them first: $undo${C_RESET}"
   confirm "Remove the $name layer (delete ${dir/#$HOME/\~})?" n || { info "Kept."; return 0; }
   rm -rf "$dir" && ok "layer $name removed · open a new terminal"
 }

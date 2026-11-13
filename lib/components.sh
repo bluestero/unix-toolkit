@@ -621,12 +621,20 @@ uninstall_kitty_nautilus() { bash "$repo/kitty/uninstall-kitty-gnome.sh"; }
 # Your patch (~/.config/work-toolkit/patches/<NAME>.dconf) is loaded after the look, so its
 # settings win; the toolkit never writes to it except when you ask (keep my changes as my patch).
 look_patch() { printf '%s' "$HOME/.config/work-toolkit/patches/$1.dconf"; }
-look_file() { sed "s#@REPO@#$repo#; s#@HERE@#$(dirname "$1")#" "$1"; }   # the look, its paths filled in
-look_applied() {   # look_applied PATH FILE [IGNORE] [NAME: with its patch]
+# Files a look points at (@HERE@/<file>: an icon) are copied out of the repo, so the setting
+# outlives a moved toolkit or a removed layer; look_copy is where they go.
+look_copy() { printf '%s' "$HOME/.local/share/work-toolkit/looks/$(basename "$(dirname "$1")")"; }
+look_refs() { grep -o "@HERE@/[^'\"]*" "$1" 2>/dev/null | sed 's#^@HERE@/##' | sort -u; }
+look_copied() { local f; for f in $(look_refs "$1"); do cmp -s "$(dirname "$1")/$f" "$(look_copy "$1")/$f" || return 1; done; }
+look_file() { sed "s#@REPO@#$repo#; s#@HERE@#$(look_copy "$1")#" "$1"; }   # the look, its paths filled in
+look_applied() {   # look_applied PATH FILE [IGNORE] [NAME: with its patch]  (a missing look is never applied)
+  [[ -s $2 ]] && look_copied "$2" || return 1
   python3 -I "$repo/lib/dconf_patch.py" applied "${3:-}" <(dconf dump "$1" 2>/dev/null) <(look_file "$2") \
     ${4:+"$(look_patch "$4")"}
 }
 look_apply() {   # look_apply PATH FILE NAME
+  [[ -s $2 ]] || { fail "the look ${2#"$repo"/} is missing, so nothing was applied"; return 1; }
+  local f; for f in $(look_refs "$2"); do mkdir -p "$(look_copy "$2")" && cp "$(dirname "$2")/$f" "$(look_copy "$2")/$f"; done
   mkdir -p "$orig_dir"
   [[ -f "$orig_dir/$3.dconf" ]] || dconf dump "$1" >"$orig_dir/$3.dconf" 2>/dev/null
   look_file "$2" | dconf load "$1"
@@ -1383,30 +1391,60 @@ uninstall_repos() {
 }
 
 # -------------------------------------------------------------- claude ---
-# Claude Code reads its config from $CLAUDE_CONFIG_DIR (shell/common.sh sets it),
-# else ~/.claude. The skill teaches Claude the toolkit; the hook hands it
-# `ctx plain` at the start of every session.
+# Claude Code reads its config from $CLAUDE_CONFIG_DIR (shell/common.sh sets it, hat per
+# folder), else ~/.claude. The skill teaches Claude the toolkit; the hook hands it
+# `ctx plain` at the start of every session. The four Claude parts go in every profile:
+# ~/.claude, each hat profile (~/.claude-profiles/<name>) and $CLAUDE_CONFIG_DIR.
 claude_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+claude_dirs() {   # every profile folder, one per line (none there yet: where claude will make one)
+  local d
+  for d in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude" "${CLAUDE_PROFILES_DIR:-$HOME/.claude-profiles}"/*/; do
+    [[ -n $d && -d $d ]] && readlink -m "$d"
+  done | awk '!seen[$0]++' | grep . || { type -P claude >/dev/null && echo "$claude_dir"; }
+  return 0
+}
+# claude_each <command...>: runs it once per profile, with claude_dir, ch_settings and cg_file set to it
+claude_each() {
+  local claude_dir ch_settings cg_file rc=0
+  while IFS= read -r claude_dir; do
+    ch_settings=$claude_dir/settings.json cg_file=$claude_dir/CLAUDE.md
+    "$@" || rc=1
+  done < <(claude_dirs)
+  return "$rc"
+}
+# claude_state <check...>: STATE over every profile: installed in all, partial (NOTE names the rest)
+claude_state() {
+  local claude_dir ch_settings cg_file n=0 all=0 miss=""
+  while IFS= read -r claude_dir; do
+    ch_settings=$claude_dir/settings.json cg_file=$claude_dir/CLAUDE.md; (( all++ ))
+    if "$@"; then (( n++ )); else miss+="${miss:+, }${claude_dir/#$HOME/\~}"; fi
+  done < <(claude_dirs)
+  NOTE=""
+  if (( ! all )); then STATE=n/a NOTE="needs Claude Code"
+  elif (( n == all )); then STATE=installed
+  elif (( n )); then STATE=partial NOTE="not in $miss"
+  else STATE=missing; fi
+}
 cs_pairs() {   # <link><TAB><skill folder>: the toolkit's skill, then each layer's
   local d
   for d in "$repo"/claude/skills/*/ "$repo"/layers/*/claude/skills/*/; do
     [[ -d $d ]] && printf '%s\t%s\n' "$claude_dir/skills/$(basename "$d")" "${d%/}"
   done
 }
+cs_has() { local l t; while IFS=$'\t' read -r l t; do linked "$l" "$t" || return 1; done < <(cs_pairs); }
 label_claude_skill() { echo "Claude skill"; }
 title_claude_skill() { echo "Claude Code knows okcli, kx, ctx and the rest, in every repo"; }
-detail_claude_skill() { echo "${claude_dir/#$HOME/\~}/skills/<name> links to claude/skills/<name> (and each layer's)"; }
-state_claude_skill() { local l t n=0 all=0; NOTE=""
-  type -P claude >/dev/null || [[ -d "$claude_dir" ]] || { STATE=n/a; NOTE="needs Claude Code"; return; }
-  while IFS=$'\t' read -r l t; do (( all++ )); linked "$l" "$t" && (( n++ )); done < <(cs_pairs)
-  if (( n == all )); then STATE=installed; elif (( n )); then STATE=partial; NOTE="$n of $all skills linked"; else STATE=missing; fi; }
-install_claude_skill() { local l t
+detail_claude_skill() { echo "skills/<name> in each Claude profile links to claude/skills/<name> (and each layer's)"; }
+state_claude_skill() { claude_state cs_has; }
+cs_install() { local l t
   while IFS=$'\t' read -r l t; do
-    linked "$l" "$t" && { ok "$(basename "$l"): already linked"; continue; }
+    linked "$l" "$t" && continue
     [[ -e "$l" && ! -L "$l" ]] && { warn "${l/#$HOME/\~} exists and isn't a link; left alone"; continue; }
     ask "Teach Claude Code the $(basename "$l") skill? (in ${claude_dir/#$HOME/\~}/skills)" && { dry || link_file "$l" "$t"; } || skip
   done < <(cs_pairs); }
-uninstall_claude_skill() { local l t; while IFS=$'\t' read -r l t; do unlink_file "$l" "$t"; done < <(cs_pairs); }
+install_claude_skill() { claude_each cs_install; }
+cs_uninstall() { local l t; while IFS=$'\t' read -r l t; do unlink_file "$l" "$t"; done < <(cs_pairs); }
+uninstall_claude_skill() { claude_each cs_uninstall; }
 
 # The hook is the one SessionStart entry whose command is $ch_cmd (the guard: the one
 # PreToolUse entry for Bash whose command is $cgd_cmd). settings.json is edited as
@@ -1438,33 +1476,40 @@ ch_write() {   # ch_write add|remove [command event matcher]
   logf "  $1 ${3:-SessionStart} hook in $ch_settings${b:+ (backup: $b)}"
   ok "done${b:+ (backup: ${b/#$HOME/\~})}"
 }
+ch_has() { ch_json has 2>/dev/null; }
 label_claude_hook() { echo "Claude start hook"; }
 title_claude_hook() { echo "Every Claude Code session starts knowing your AWS profile, pin and cluster"; }
-detail_claude_hook() { echo "a SessionStart hook in ${ch_settings/#$HOME/\~} that runs: $ch_cmd"; }
-state_claude_hook() { NOTE=""
-  type -P claude >/dev/null || [[ -d "$claude_dir" ]] || { STATE=n/a; NOTE="needs Claude Code"; return; }
-  if ch_json has 2>/dev/null; then STATE=installed; else STATE=missing; fi; }
-install_claude_hook() { ch_json has 2>/dev/null && { ok "already there"; return; }
+detail_claude_hook() { echo "a SessionStart hook in each Claude profile's settings.json that runs: $ch_cmd"; }
+state_claude_hook() { claude_state ch_has; }
+ch_install() { ch_has && return
   ask "Add the start hook to ${ch_settings/#$HOME/\~}? (runs ${C}ctx plain${R} when a session opens)" && { dry || ch_write add; } || skip; }
-uninstall_claude_hook() { ch_json has 2>/dev/null || { ok "not there"; return 0; }; ch_write remove; }
+install_claude_hook() { claude_each ch_install; }
+ch_uninstall() { ch_has || return 0; ch_write remove; }
+uninstall_claude_hook() { claude_each ch_uninstall; }
 
 # The guard (claude/guard.sh, through tk): before each Bash command, has you approve
 # one that changes something on PROD or leans on an inherited PROD profile/context.
+# With no tk to run, Claude Code lets every command through, so the part says so.
 cgd_cmd="tk __guard"
 cgd_json() { ch_json "$1" "$cgd_cmd" PreToolUse Bash; }
+cgd_has() { cgd_json has 2>/dev/null; }
 label_claude_guard() { echo "Claude PROD guard"; }
 title_claude_guard() { echo "Claude Code asks you first before changing anything on PROD"; }
-detail_claude_guard() { echo "a PreToolUse hook for Bash in ${ch_settings/#$HOME/\~} that runs: $cgd_cmd"; }
-state_claude_guard() { NOTE=""
-  type -P claude >/dev/null || [[ -d "$claude_dir" ]] || { STATE=n/a; NOTE="needs Claude Code"; return; }
-  if cgd_json has 2>/dev/null; then STATE=installed; else STATE=missing; fi; }
-install_claude_guard() { cgd_json has 2>/dev/null && { ok "already there"; return; }
+detail_claude_guard() { echo "a PreToolUse hook for Bash in each Claude profile's settings.json that runs: $cgd_cmd"; }
+state_claude_guard() { claude_state cgd_has
+  if [[ $STATE == installed || $STATE == partial ]] && ! type -P tk >/dev/null; then
+    STATE=partial NOTE="it can't run: the tk command isn't on PATH (set up commands)${NOTE:+; $NOTE}"
+  fi; }
+cgd_install() { cgd_has && return
   ask "Add the PROD guard to ${ch_settings/#$HOME/\~}? (Claude asks you before a command that changes PROD)" && { dry || ch_write add "$cgd_cmd" PreToolUse Bash; } || skip; }
-uninstall_claude_guard() { cgd_json has 2>/dev/null || { ok "not there"; return 0; }; ch_write remove "$cgd_cmd" PreToolUse Bash; }
+install_claude_guard() { claude_each cgd_install
+  type -P tk >/dev/null || warn "the guard runs the tk command, which isn't on PATH, so it checks nothing yet: set up ${B}commands${R}"; }
+cgd_uninstall() { cgd_has || return 0; ch_write remove "$cgd_cmd" PreToolUse Bash; }
+uninstall_claude_guard() { claude_each cgd_uninstall; }
 
 # Coding guidelines and skills for Claude Code, as Claude Code plugins: each comes from its
-# authors' GitHub repo (a plugin marketplace), and `claude plugin update` keeps it current.
-# Picked in a list; --yes installs only the Karpathy guidelines.
+# authors' GitHub repo (a plugin marketplace), and `claude plugin update` keeps them current.
+# Picked in a list once, then installed in every profile; --yes installs only the Karpathy guidelines.
 # plugin@marketplace|GitHub repo|name|what it gives
 CP_CATALOG=(
   "andrej-karpathy-skills@karpathy-skills|multica-ai/andrej-karpathy-skills|Karpathy guidelines|think before coding, keep it simple, small diffs, verify the goal"
@@ -1481,12 +1526,15 @@ CP_CATALOG=(
 )
 cp_has() { grep -qF "\"$1\":" "$claude_dir/plugins/installed_plugins.json" 2>/dev/null; }      # plugin@marketplace
 cp_mkt() { grep -qF "\"$1\":" "$claude_dir/plugins/known_marketplaces.json" 2>/dev/null; }      # marketplace added
+cp_in() { local claude_dir n=0; while IFS= read -r claude_dir; do cp_has "$1" && (( n++ )); done < <(claude_dirs); echo "$n"; }   # in how many profiles
+cp_mkt_any() { local claude_dir; while IFS= read -r claude_dir; do cp_mkt "$1" && return 0; done < <(claude_dirs); return 1; }
 cp_rows() {   # the picker's table: title row, then one row per plugin (plugin@marketplace hidden after a TAB)
-  local l id repo name what st
+  local l id repo name what st n all; all=$(claude_dirs | grep -c .)
   printf '%s\x1f%s\x1f%s\x1f%s\t\n' "${B}PLUGIN$R" "${B}STATE$R" "${B}WHAT YOU GET$R" "${B}FROM$R"
   for l in "${CP_CATALOG[@]}"; do
     IFS='|' read -r id repo name what <<<"$l"
-    if cp_has "$id"; then st="$G✓ installed$R"; else st="${D}not installed$R"; fi
+    n=$(cp_in "$id")
+    if (( n && n == all )); then st="$G✓ installed$R"; elif (( n )); then st="$Y◐ in $n of $all profiles$R"; else st="${D}not installed$R"; fi
     printf '%s\x1f%s\x1f%s\x1f%s\t%s\n' "$name" "$st" "$D$what$R" "${D}github.com/$repo$R" "$id"
   done
 }
@@ -1507,17 +1555,42 @@ PY
   logf "  removed the old guidelines block from $cg_file${b:+ (backup: $b)}"
   ok "old copy removed from ${cg_file/#$HOME/\~}${b:+ (backup: ${b/#$HOME/\~})}"
 }
+cg_absent() { ! cg_present; }
+cg_ok() { local l; cg_present && return 1; for l in "${CP_CATALOG[@]}"; do cp_has "${l%%|*}" && return 0; done; return 1; }
 label_claude_guidelines() { echo "Claude guidelines & skills"; }
 title_claude_guidelines() { echo "Pick coding guidelines and skills for Claude Code (Karpathy, Superpowers, Anthropic, Trail of Bits)"; }
-detail_claude_guidelines() { echo "Claude Code plugins from their authors' GitHub repos, for every project; claude plugin update keeps them current"; }
-state_claude_guidelines() { local l id names=""; NOTE=""
-  type -P claude >/dev/null || [[ -d "$claude_dir" ]] || { STATE=n/a; NOTE="needs Claude Code"; return; }
-  for l in "${CP_CATALOG[@]}"; do id=${l%%|*}; cp_has "$id" && names+="${names:+, }$(cut -d'|' -f3 <<<"$l")"; done
-  if cg_present; then STATE=partial; NOTE="an old copy in CLAUDE.md; the Karpathy plugin replaces it"
-  elif [[ -n $names ]]; then STATE=installed; NOTE=$names
-  else STATE=missing; fi; }
+detail_claude_guidelines() { echo "Claude Code plugins from their authors' GitHub repos, in each Claude profile; claude plugin update keeps them current"; }
+state_claude_guidelines() { local l names=""
+  claude_state cg_ok
+  if [[ $STATE == missing ]] && ! claude_each cg_absent; then   # an old copy in some profile
+    STATE=partial NOTE="an old copy in CLAUDE.md; the Karpathy plugin replaces it"
+  fi
+  [[ $STATE == installed ]] || return 0
+  for l in "${CP_CATALOG[@]}"; do (( $(cp_in "${l%%|*}") )) && names+="${names:+, }$(cut -d'|' -f3 <<<"$l")"; done
+  NOTE=$names; }
+cp_install() {   # cp_install <plugin@marketplace per line>: those into this profile
+  local id repo name what karpathy=${CP_CATALOG[0]%%|*}
+  while IFS= read -r id; do
+    [[ -n $id ]] || continue
+    IFS='|' read -r _ repo name what <<<"$(printf '%s\n' "${CP_CATALOG[@]}" | grep -m1 -F "$id|")"
+    cp_has "$id" && continue
+    ask "Install $name in ${claude_dir/#$HOME/\~}? (Claude Code plugin from github.com/$repo)" || { skip; continue; }
+    dry && continue
+    if ! cp_mkt "${id#*@}"; then   # added by us: the uninstall removes it again
+      CLAUDE_CONFIG_DIR=$claude_dir claude plugin marketplace add "$repo" >>"$log_file" 2>&1 ||
+        { fail "couldn't add github.com/$repo to Claude Code (see the log)"; continue; }
+      remember_setting "claude-marketplace-${id#*@}" added
+    fi
+    if CLAUDE_CONFIG_DIR=$claude_dir claude plugin install "$id" >>"$log_file" 2>&1; then ok "$name installed"
+    else fail "$name not installed (see the log)"; fi
+  done <<<"$1"
+  cg_present || return 0
+  if cp_has "$karpathy"; then
+    ask "Remove the old copy of the Karpathy guidelines from ${cg_file/#$HOME/\~}? (the plugin replaces it)" && { dry || cg_remove; } || skip
+  elif ! dry; then warn "an old copy of the Karpathy guidelines stays in ${cg_file/#$HOME/\~}; pick Karpathy guidelines to move it to the plugin"; fi
+}
 install_claude_guidelines() {
-  local picked="" id repo name what karpathy=${CP_CATALOG[0]%%|*}
+  local picked="" karpathy=${CP_CATALOG[0]%%|*}
   type -P claude >/dev/null || { skip "the claude command isn't on PATH"; return; }
   case "$mode" in
     dry) say "  ${C}?${R} Pick the guidelines and skills to install ${D}(dry run: not asked)${R}" ;;
@@ -1525,44 +1598,32 @@ install_claude_guidelines() {
     *)
       if ! type -P fzf >/dev/null || [[ ! -t 0 ]]; then skip "picking needs fzf and a terminal"; return; fi
       picked=$(cp_rows | ui_fzf "Claude guidelines & skills" --multi --header-lines=1 --delimiter=$'\t' --with-nth=1 \
-        --header='tab: tick/untick · enter: install the ticked ones · esc: cancel' | cut -f2) || { skip; return; } ;;
+        --header='tab: tick/untick · enter: install the ticked ones in every profile · esc: cancel' | cut -f2) || { skip; return; } ;;
   esac
-  while IFS= read -r id; do
-    [[ -n $id ]] || continue
-    IFS='|' read -r _ repo name what <<<"$(printf '%s\n' "${CP_CATALOG[@]}" | grep -m1 -F "$id|")"
-    cp_has "$id" && { ok "$name: already installed"; continue; }
-    ask "Install $name? (Claude Code plugin from github.com/$repo)" || { skip; continue; }
-    dry && continue
-    if ! cp_mkt "${id#*@}"; then   # added by us: the uninstall removes it again
-      claude plugin marketplace add "$repo" >>"$log_file" 2>&1 ||
-        { fail "couldn't add github.com/$repo to Claude Code (see the log)"; continue; }
-      remember_setting "claude-marketplace-${id#*@}" added
-    fi
-    if claude plugin install "$id" >>"$log_file" 2>&1; then ok "$name installed"
-    else fail "$name not installed (see the log)"; fi
-  done <<<"$picked"
-  cg_present || return 0
-  if cp_has "$karpathy"; then
-    ask "Remove the old copy of the Karpathy guidelines from ${cg_file/#$HOME/\~}? (the plugin replaces it)" && { dry || cg_remove; } || skip
-  elif ! dry; then warn "an old copy of the Karpathy guidelines stays in ${cg_file/#$HOME/\~}; pick Karpathy guidelines to move it to the plugin"; fi
+  claude_each cp_install "$picked"
 }
-uninstall_claude_guidelines() { local l id n=0
+cp_uninstall() { local l id
   for l in "${CP_CATALOG[@]}"; do
-    id=${l%%|*}; cp_has "$id" || continue; (( n++ ))
-    if claude plugin uninstall "$id" >>"$log_file" 2>&1; then ok "removed $(cut -d'|' -f3 <<<"$l")"
-    else fail "couldn't remove $(cut -d'|' -f3 <<<"$l") (see the log)"; fi
+    id=${l%%|*}; cp_has "$id" || continue
+    if CLAUDE_CONFIG_DIR=$claude_dir claude plugin uninstall "$id" >>"$log_file" 2>&1; then ok "removed $(cut -d'|' -f3 <<<"$l") from ${claude_dir/#$HOME/\~}"
+    else fail "couldn't remove $(cut -d'|' -f3 <<<"$l") from ${claude_dir/#$HOME/\~} (see the log)"; fi
   done
-  cg_present && { (( n++ )); cg_remove; }
-  # the plugin sources the toolkit added, once no plugin from them is left
+  cg_present && cg_remove
+  # the plugin sources the toolkit added, once no plugin from them is left here
   for l in $(printf '%s\n' "${CP_CATALOG[@]}" | cut -d'|' -f1 | sed 's/.*@//' | sort -u); do
-    [[ $(recall_setting "claude-marketplace-$l") == added ]] || continue
+    [[ $(recall_setting "claude-marketplace-$l") == added ]] && cp_mkt "$l" || continue
     grep -qF "@$l\":" "$claude_dir/plugins/installed_plugins.json" 2>/dev/null && continue
-    (( n++ ))
-    if ! cp_mkt "$l" || claude plugin marketplace remove "$l" >>"$log_file" 2>&1; then
-      forget_setting "claude-marketplace-$l"; ok "removed the $l plugin source"
+    if CLAUDE_CONFIG_DIR=$claude_dir claude plugin marketplace remove "$l" >>"$log_file" 2>&1; then ok "removed the $l plugin source from ${claude_dir/#$HOME/\~}"
     else fail "couldn't remove the $l plugin source (see the log)"; fi
   done
-  (( n )) || ok "not there"; }
+  return 0
+}
+uninstall_claude_guidelines() { local l
+  claude_each cp_uninstall
+  for l in $(printf '%s\n' "${CP_CATALOG[@]}" | cut -d'|' -f1 | sed 's/.*@//' | sort -u); do   # gone from every profile: forget it
+    [[ $(recall_setting "claude-marketplace-$l") == added ]] && ! cp_mkt_any "$l" && forget_setting "claude-marketplace-$l"
+  done
+  return 0; }
 
 # -------------------------------------------------------------- layers ---
 # Each layer's own components (lib/layers.sh), after the toolkit's.
